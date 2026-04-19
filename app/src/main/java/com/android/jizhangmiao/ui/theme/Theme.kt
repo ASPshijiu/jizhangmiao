@@ -1,46 +1,65 @@
 package com.android.jizhangmiao.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Mint80,
-    secondary = Slate80,
-    tertiary = Coral80
+    primary = NightAccent,
+    onPrimary = Night,
+    primaryContainer = ForestGreen,
+    onPrimaryContainer = Paper,
+    secondary = ClayOrange,
+    onSecondary = Paper,
+    tertiary = HoneyGold,
+    onTertiary = Night,
+    background = Night,
+    onBackground = Paper,
+    surface = NightSurface,
+    onSurface = Paper,
+    surfaceVariant = ColorTokens.darkSurfaceVariant,
+    onSurfaceVariant = ColorTokens.darkOnSurfaceVariant,
+    outline = ColorTokens.darkOutline,
+    error = ColorTokens.error
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Mint40,
-    secondary = Slate40,
-    tertiary = Coral40
+    primary = ForestGreen,
+    onPrimary = Paper,
+    primaryContainer = ForestGreenSoft,
+    onPrimaryContainer = Ink,
+    secondary = ClayOrange,
+    onSecondary = Paper,
+    tertiary = HoneyGold,
+    onTertiary = Ink,
+    background = Paper,
+    onBackground = Ink,
+    surface = ColorTokens.lightSurface,
+    onSurface = Ink,
+    surfaceVariant = PaperDeep,
+    onSurfaceVariant = Mist,
+    outline = OutlineSoft,
+    error = ColorTokens.error
 )
 
 @Composable
 fun JizhangmiaoTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    darkTheme: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
         typography = Typography,
         content = content
     )
+}
+
+private object ColorTokens {
+    val lightSurface = Color(0xFFFDF9F2)
+    val darkSurfaceVariant = Color(0xFF22302B)
+    val darkOnSurfaceVariant = Color(0xFFBCC8C2)
+    val darkOutline = Color(0xFF42534C)
+    val error = Color(0xFFB74D3E)
 }
