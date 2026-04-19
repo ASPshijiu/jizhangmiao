@@ -1,0 +1,4 @@
+<resources>
+
+    <style name="Theme.记账喵" parent="Theme.MaterialComponents.Light" />
+</resources>
