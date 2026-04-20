@@ -2,7 +2,12 @@
 
 package com.android.jizhangmiao.ledger
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
+import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -28,8 +33,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
@@ -49,15 +56,19 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,9 +91,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.android.jizhangmiao.ledger.data.LedgerAppSettings
+import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
@@ -137,6 +151,10 @@ fun LedgerScreen(
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
     onScanReceipt: (Uri) -> Unit,
+    onApplyVoiceInput: (String) -> Unit,
+    onQuickEntryNotificationEnabledChanged: (Boolean) -> Unit,
+    launchRequest: LedgerLaunchRequest?,
+    onLaunchRequestConsumed: () -> Unit,
     onDismissStatusMessage: () -> Unit
 ) {
     var periodFilterName by rememberSaveable { mutableStateOf(LedgerPeriodFilter.THIS_MONTH.name) }
@@ -167,11 +185,12 @@ fun LedgerScreen(
             LedgerBoard.LEDGER,
             LedgerBoard.STATS,
             LedgerBoard.BUDGET,
-            LedgerBoard.TOOLS
+            LedgerBoard.SETTINGS
         )
     }
     val pagerState = rememberPagerState(pageCount = { boards.size })
     val coroutineScope = rememberCoroutineScope()
+    val boardTabState = rememberLazyListState()
 
     val filteredEntries = remember(uiState.entries, periodFilter, typeFilter, accountFilter, categoryFilter) {
         filterEntries(
@@ -259,6 +278,7 @@ fun LedgerScreen(
     ) { uri ->
         uri?.let(onExportBackup)
     }
+    val context = LocalContext.current
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -269,6 +289,49 @@ fun LedgerScreen(
     ) { uri ->
         uri?.let(onScanReceipt)
     }
+    val voiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val spokenText = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (spokenText.isNotBlank()) {
+            onApplyVoiceInput(spokenText)
+        }
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            onQuickEntryNotificationEnabledChanged(true)
+        }
+    }
+    val launchVoiceRecognition: () -> Unit = {
+        runCatching {
+            voiceLauncher.launch(
+                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINA.toLanguageTag())
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "\u8bf4\u51fa\u4e00\u7b14\u8bb0\u8d26\uff0c\u4f8b\u5982\uff1a\u5fae\u4fe1\u652f\u51fa 18 \u5757\u9910\u996e")
+                }
+            )
+        }.getOrDefault(Unit)
+    }
+    val handleQuickEntryNotificationToggle: (Boolean) -> Unit = { enabled ->
+        val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+
+        if (enabled && needsPermission) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            onQuickEntryNotificationEnabledChanged(enabled)
+        }
+    }
     val openBoard: (LedgerBoard) -> Unit = { board ->
         val targetPage = boards.indexOf(board)
         if (targetPage >= 0) {
@@ -276,6 +339,20 @@ fun LedgerScreen(
                 pagerState.animateScrollToPage(targetPage)
             }
         }
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        boardTabState.animateScrollToItem(pagerState.currentPage)
+    }
+
+    LaunchedEffect(launchRequest?.nonce) {
+        val request = launchRequest ?: return@LaunchedEffect
+        request.entryType?.let(onTypeSelected)
+        openBoard(request.board)
+        if (request.requestVoice) {
+            launchVoiceRecognition()
+        }
+        onLaunchRequestConsumed()
     }
 
     Box(
@@ -317,6 +394,7 @@ fun LedgerScreen(
                         }
                     )
                     LazyRow(
+                        state = boardTabState,
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -327,6 +405,10 @@ fun LedgerScreen(
                                 onClick = {
                                     openBoard(board)
                                 },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                    selectedLabelColor = MaterialTheme.colorScheme.primary
+                                ),
                                 label = {
                                     Text(board.displayName())
                                 }
@@ -391,6 +473,7 @@ fun LedgerScreen(
                                 onScanReceiptClick = {
                                     receiptLauncher.launch("image/*")
                                 },
+                                onVoiceInputClick = launchVoiceRecognition,
                                 onEditClick = onEditClick,
                                 onDeleteClick = onDeleteClick,
                                 onViewAllEntriesClick = {
@@ -498,7 +581,11 @@ fun LedgerScreen(
                                 onDeleteTemplateClick = onDeleteTemplateClick
                             )
 
-                            LedgerBoard.TOOLS -> ToolsBoard(
+                            LedgerBoard.SETTINGS -> SettingsBoard(
+                                settings = uiState.settings,
+                                automationTrace = uiState.automationTrace,
+                                onQuickEntryNotificationEnabledChanged = handleQuickEntryNotificationToggle,
+                                onOpenVoiceInput = launchVoiceRecognition,
                                 onExportClick = {
                                     exportLauncher.launch("jizhangmiao-backup-${LocalDate.now()}.json")
                                 },
@@ -560,6 +647,7 @@ private fun QuickEntryBoard(
     onCancelEditClick: () -> Unit,
     onSaveTemplateClick: () -> Unit,
     onScanReceiptClick: () -> Unit,
+    onVoiceInputClick: () -> Unit,
     onEditClick: (LedgerEntry) -> Unit,
     onDeleteClick: (LedgerEntry) -> Unit,
     onViewAllEntriesClick: () -> Unit
@@ -586,6 +674,7 @@ private fun QuickEntryBoard(
                 onCancelEditClick = onCancelEditClick,
                 onSaveTemplateClick = onSaveTemplateClick,
                 onScanReceiptClick = onScanReceiptClick,
+                onVoiceInputClick = onVoiceInputClick,
                 isReceiptScanning = isReceiptScanning
             )
         }
@@ -972,7 +1061,11 @@ private fun BudgetBoard(
 }
 
 @Composable
-private fun ToolsBoard(
+private fun SettingsBoard(
+    settings: LedgerAppSettings,
+    automationTrace: LedgerAutomationTrace,
+    onQuickEntryNotificationEnabledChanged: (Boolean) -> Unit,
+    onOpenVoiceInput: () -> Unit,
     onExportClick: () -> Unit,
     onImportClick: () -> Unit
 ) {
@@ -993,6 +1086,9 @@ private fun ToolsBoard(
                 onOpenAccessibilityAccess = {
                     openAccessibilityAutomationSettings(context)
                 },
+                onOpenAppNotificationSettings = {
+                    openAppNotificationSettings(context)
+                },
                 onOpenWeChat = {
                     launchExternalPaymentApp(context, WeChatPackageName)
                 },
@@ -1000,6 +1096,19 @@ private fun ToolsBoard(
                     launchExternalPaymentApp(context, AlipayPackageName)
                 }
             )
+        }
+
+        item {
+            QuickShortcutSection(
+                settings = settings,
+                appNotificationsEnabled = automationStatus.appNotificationsEnabled,
+                onQuickEntryNotificationEnabledChanged = onQuickEntryNotificationEnabledChanged,
+                onOpenVoiceInput = onOpenVoiceInput
+            )
+        }
+
+        item {
+            AutomationTraceSection(trace = automationTrace)
         }
 
         item {
@@ -1040,6 +1149,20 @@ private fun DecorativeBackdrop() {
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
+                .offset(x = 120.dp, y = (-84).dp)
+                .size(width = 260.dp, height = 180.dp)
+                .clip(RoundedCornerShape(90.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(
+                            Color(0x22C76B4B),
+                            Color(0x112E8B57)
+                        )
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
                 .offset(x = 240.dp, y = (-48).dp)
                 .size(220.dp)
                 .clip(CircleShape)
@@ -1051,6 +1174,13 @@ private fun DecorativeBackdrop() {
                 .size(180.dp)
                 .clip(CircleShape)
                 .background(Color(0x22C76B4B))
+        )
+        Box(
+            modifier = Modifier
+                .offset(x = 170.dp, y = 620.dp)
+                .size(160.dp)
+                .clip(CircleShape)
+                .background(Color(0x145B8DEF))
         )
     }
 }
@@ -2259,6 +2389,7 @@ private fun EntryEditorSection(
     onCancelEditClick: () -> Unit,
     onSaveTemplateClick: () -> Unit,
     onScanReceiptClick: () -> Unit,
+    onVoiceInputClick: () -> Unit,
     isReceiptScanning: Boolean
 ) {
     val accentColor = if (form.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
@@ -2358,6 +2489,29 @@ private fun EntryEditorSection(
                     selected = form.type == LedgerEntryType.INCOME,
                     onClick = { onTypeSelected(LedgerEntryType.INCOME) }
                 )
+            }
+
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    FilterChip(
+                        selected = false,
+                        onClick = onVoiceInputClick,
+                        label = {
+                            Text("\u8bed\u97f3\u8bb0\u8d26")
+                        }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = false,
+                        onClick = onScanReceiptClick,
+                        label = {
+                            Text(
+                                if (isReceiptScanning) "\u8bc6\u522b\u4e2d..." else "\u626b\u5c0f\u7968"
+                            )
+                        }
+                    )
+                }
             }
 
             OutlinedTextField(
@@ -2593,7 +2747,10 @@ private fun SelectionField(
             value = value,
             onValueChange = {},
             modifier = Modifier
-                .menuAnchor()
+                .menuAnchor(
+                    type = MenuAnchorType.PrimaryNotEditable,
+                    enabled = true
+                )
                 .fillMaxWidth(),
             readOnly = true,
             singleLine = true,
@@ -2716,6 +2873,7 @@ private fun AutomationSection(
     status: NotificationAutomationStatus,
     onOpenNotificationAccess: () -> Unit,
     onOpenAccessibilityAccess: () -> Unit,
+    onOpenAppNotificationSettings: () -> Unit,
     onOpenWeChat: () -> Unit,
     onOpenAlipay: () -> Unit
 ) {
@@ -2735,6 +2893,13 @@ private fun AutomationSection(
             )
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    AutomationStatusPill(
+                        label = if (status.appNotificationsEnabled) "\u5e94\u7528\u901a\u77e5\u5df2\u5f00"
+                        else "\u5e94\u7528\u901a\u77e5\u672a\u5f00",
+                        active = status.appNotificationsEnabled
+                    )
+                }
                 item {
                     AutomationStatusPill(
                         label = if (status.notificationAccessEnabled) "\u901a\u77e5\u5df2\u5f00"
@@ -2770,12 +2935,16 @@ private fun AutomationSection(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Text(
-                    text = if (status.notificationAccessEnabled && status.accessibilityAccessEnabled) {
-                        "\u5f53\u524d\u5df2\u540c\u65f6\u5f00\u542f\u901a\u77e5\u548c\u65e0\u969c\u788d\u8bfb\u5c4f\u3002\u901a\u77e5\u53ef\u6293\u53d6\u540e\u53f0\u63d0\u9192\uff0c\u65e0\u969c\u788d\u4f1a\u76f4\u63a5\u8bc6\u522b\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u7684\u652f\u4ed8\u6210\u529f\u9875\u548c\u6536\u6b3e\u9875\u3002"
-                    } else if (status.notificationAccessEnabled || status.accessibilityAccessEnabled) {
-                        "\u5f53\u524d\u53ea\u5f00\u4e86\u4e00\u90e8\u5206\u81ea\u52a8\u5bfc\u5165\u80fd\u529b\u3002\u5efa\u8bae\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u90fd\u6253\u5f00\uff0c\u8fd9\u6837\u652f\u4ed8\u901a\u77e5\u548c\u4ed8\u6b3e/\u6536\u6b3e\u6210\u529f\u9875\u90fd\u80fd\u88ab\u8bb0\u5f55\u3002"
+                    text = if (
+                        status.appNotificationsEnabled &&
+                        status.notificationAccessEnabled &&
+                        status.accessibilityAccessEnabled
+                    ) {
+                        "\u5f53\u524d\u5df2\u540c\u65f6\u6253\u5f00\u5e94\u7528\u901a\u77e5\u3001\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u8bfb\u5c4f\u3002\u80cc\u666f\u901a\u77e5\u3001\u652f\u4ed8\u7ed3\u679c\u9875\u3001\u6536\u6b3e\u9875\u90fd\u4f1a\u88ab\u5c1d\u8bd5\u8bc6\u522b\u3002"
+                    } else if (status.notificationAccessEnabled || status.accessibilityAccessEnabled || status.appNotificationsEnabled) {
+                        "\u81ea\u52a8\u8bb0\u8d26\u5df2\u5f00\u542f\u4e00\u90e8\u5206\u80fd\u529b\uff0c\u4f46\u8fd8\u6ca1\u5168\u90e8\u6253\u901a\u3002\u5efa\u8bae\u5c06\u5e94\u7528\u901a\u77e5\u3001\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u90fd\u6253\u5f00\uff0c\u8ba9\u901a\u77e5\u548c\u652f\u4ed8\u6210\u529f\u9875\u90fd\u80fd\u8fdb\u5165\u89e3\u6790\u3002"
                     } else {
-                        "\u8981\u8ba9\u81ea\u52a8\u8bb0\u8d26\u751f\u6548\uff0c\u8bf7\u5148\u5728\u7cfb\u7edf\u8bbe\u7f6e\u91cc\u540c\u65f6\u6253\u5f00\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u670d\u52a1\u3002\u8fd9\u6837\u4e0d\u9700\u8981\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u7684\u79c1\u6709\u63a5\u53e3\u4e5f\u80fd\u62ff\u5230\u4ea4\u6613\u7ed3\u679c\u3002"
+                        "\u8981\u8ba9\u81ea\u52a8\u8bb0\u8d26\u751f\u6548\uff0c\u8bf7\u5148\u5728\u7cfb\u7edf\u8bbe\u7f6e\u91cc\u6253\u5f00\u5e94\u7528\u901a\u77e5\u3001\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u670d\u52a1\u3002\u8fd9\u6837\u4e0d\u9700\u8981\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u79c1\u6709\u63a5\u53e3\u4e5f\u80fd\u62ff\u5230\u4ea4\u6613\u7ed3\u679c\u3002"
                     },
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     style = MaterialTheme.typography.bodyMedium,
@@ -2797,18 +2966,40 @@ private fun AutomationSection(
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
+                    onClick = onOpenAppNotificationSettings,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text(if (status.appNotificationsEnabled) "\u5e94\u7528\u901a\u77e5" else "\u6253\u5f00\u5e94\u7528\u901a\u77e5")
+                }
+                OutlinedButton(
                     onClick = onOpenNotificationAccess,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(20.dp)
                 ) {
                     Text(if (status.notificationAccessEnabled) "\u901a\u77e5\u6743\u9650" else "\u6253\u5f00\u901a\u77e5")
                 }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = onOpenAccessibilityAccess,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(20.dp)
                 ) {
                     Text(if (status.accessibilityAccessEnabled) "\u65e0\u969c\u788d\u6743\u9650" else "\u6253\u5f00\u65e0\u969c\u788d")
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text(
+                        text = "\u53ef\u5728\u4e0b\u65b9\u201c\u6700\u8fd1\u81ea\u52a8\u8bb0\u8d26\u72b6\u6001\u201d\u91cc\u770b\u6700\u8fd1\u4e00\u6b21\u8bc6\u522b\u5230\u7684\u6587\u672c",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
@@ -2857,6 +3048,194 @@ private fun AutomationStatusPill(
                 MaterialTheme.colorScheme.onSurfaceVariant
             }
         )
+    }
+}
+
+@Composable
+private fun QuickShortcutSection(
+    settings: LedgerAppSettings,
+    appNotificationsEnabled: Boolean,
+    onQuickEntryNotificationEnabledChanged: (Boolean) -> Unit,
+    onOpenVoiceInput: () -> Unit
+) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u5feb\u6377\u5165\u53e3",
+                subtitle = "\u901a\u77e5\u680f\u5feb\u8bb0\u3001\u684c\u9762 2x2 \u5c0f\u63d2\u4ef6\u548c\u8bed\u97f3\u8bb0\u8d26\u90fd\u5728\u8fd9\u91cc"
+            )
+
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(22.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "\u901a\u77e5\u680f\u5feb\u901f\u8bb0\u8d26",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = if (appNotificationsEnabled) {
+                                "\u6253\u5f00\u540e\u4f1a\u5728\u901a\u77e5\u680f\u5e38\u9a7b\u201c\u5feb\u8bb0 / \u652f\u51fa / \u8bed\u97f3\u201d\u5165\u53e3"
+                            } else {
+                                "\u9700\u8981\u5148\u6253\u5f00 App \u901a\u77e5\uff0c\u5426\u5219\u901a\u77e5\u680f\u5feb\u6377\u5165\u53e3\u4e0d\u4f1a\u663e\u793a"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = settings.quickEntryNotificationEnabled,
+                        onCheckedChange = onQuickEntryNotificationEnabledChanged,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.primary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)
+                        )
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "\u684c\u9762 2x2 \u5c0f\u63d2\u4ef6",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "\u5df2\u52a0\u5165\u5c0f\u63d2\u4ef6\uff0c\u5728\u684c\u9762\u957f\u6309\u6216\u201c\u6dfb\u52a0\u5c0f\u90e8\u4ef6\u201d\u91cc\u627e\u201c\u8bb0\u8d26\u55b5\u5feb\u8bb0\u201d\u5373\u53ef\u653e\u7f6e",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "\u8bed\u97f3\u8bb0\u8d26",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "\u4f8b\u5982\uff1a\u201c\u652f\u4ed8\u5b9d\u652f\u51fa 18 \u9910\u996e\u201d\u3001\u201c\u5fae\u4fe1\u6536\u5165 200 \u7ea2\u5305\u201d",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedButton(
+                            onClick = onOpenVoiceInput,
+                            shape = RoundedCornerShape(18.dp)
+                        ) {
+                            Text("\u7acb\u5373\u8bd5\u8bed\u97f3")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutomationTraceSection(trace: LedgerAutomationTrace) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SectionHeading(
+                title = "\u6700\u8fd1\u81ea\u52a8\u8bb0\u8d26\u72b6\u6001",
+                subtitle = "\u8fd9\u91cc\u4f1a\u663e\u793a\u6700\u8fd1\u4e00\u6b21\u6293\u5230\u7684\u901a\u77e5/\u9875\u9762\u6587\u5b57\uff0c\u7528\u6765\u5224\u65ad\u4e3a\u4ec0\u4e48\u6ca1\u5165\u8d26"
+            )
+
+            if (!trace.isAvailable) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Text(
+                        text = "\u6682\u65f6\u8fd8\u6ca1\u6293\u5230\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u7684\u4ea4\u6613\u7ed3\u679c\u3002\u5b8c\u6210\u4e00\u7b14\u4ed8\u6b3e\u6216\u6536\u6b3e\u540e\uff0c\u56de\u6765\u8fd9\u91cc\u770b\u6700\u8fd1\u8bb0\u5f55\u3002",
+                        modifier = Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = trace.summary,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "\u6765\u6e90\uff1a${trace.sourceLabel}  ${formatEntryTime(trace.happenedAt)}",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (trace.rawText.isNotBlank()) {
+                            Surface(
+                                color = Color.White.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(18.dp)
+                            ) {
+                                Text(
+                                    text = trace.rawText.take(220),
+                                    modifier = Modifier.padding(12.dp),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -3127,12 +3506,12 @@ private data class ChartFocus(
     val category: String
 )
 
-private enum class LedgerBoard {
+enum class LedgerBoard {
     QUICK_ENTRY,
     DASHBOARD,
     STATS,
     BUDGET,
-    TOOLS,
+    SETTINGS,
     LEDGER
 }
 
@@ -3147,7 +3526,7 @@ private fun LedgerBoard.displayName(): String {
         LedgerBoard.DASHBOARD -> "\u4eea\u8868\u76d8"
         LedgerBoard.STATS -> "\u5206\u6790"
         LedgerBoard.BUDGET -> "\u89c4\u5212"
-        LedgerBoard.TOOLS -> "\u6570\u636e"
+        LedgerBoard.SETTINGS -> "\u8bbe\u7f6e"
         LedgerBoard.LEDGER -> "\u8d26\u672c"
     }
 }
@@ -3158,7 +3537,7 @@ private fun LedgerBoard.subtitle(): String {
         LedgerBoard.DASHBOARD -> "\u4f59\u989d\u603b\u89c8\u3001\u8d26\u6237\u770b\u677f\u548c\u6838\u5fc3\u6307\u6807"
         LedgerBoard.STATS -> "\u6536\u652f\u56fe\u8868\u3001\u8d8b\u52bf\u548c\u5206\u7c7b\u660e\u7ec6"
         LedgerBoard.BUDGET -> "\u9884\u7b97\u3001\u5feb\u6377\u6a21\u677f\u548c\u5468\u671f\u6a21\u677f\u90fd\u5728\u8fd9\u91cc"
-        LedgerBoard.TOOLS -> "\u5907\u4efd\u3001\u5bfc\u5165\u548c\u6362\u673a\u8fc1\u79fb"
+        LedgerBoard.SETTINGS -> "\u81ea\u52a8\u8bb0\u8d26\u3001\u5feb\u6377\u5165\u53e3\u3001\u5907\u4efd\u548c\u8fc1\u79fb"
         LedgerBoard.LEDGER -> "\u7b5b\u9009\u5e76\u7ba1\u7406\u5168\u90e8\u8d26\u76ee"
     }
 }

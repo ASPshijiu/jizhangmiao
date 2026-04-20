@@ -7,6 +7,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
 import com.android.jizhangmiao.ledger.data.toAmountInCents
 import com.android.jizhangmiao.ledger.data.toAmountInput
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withContext
 data class ReceiptRecognitionResult(
     val rawText: String,
     val amountInput: String?,
+    val account: String?,
     val category: String?,
     val suggestedNote: String,
     val type: LedgerEntryType?
@@ -71,9 +73,31 @@ internal fun parseReceiptText(text: String): ReceiptRecognitionResult? {
     return ReceiptRecognitionResult(
         rawText = text,
         amountInput = finalAmount?.toAmountInput(),
+        account = guessAccount(text),
         category = category,
         suggestedNote = suggestedNote,
         type = type
+    )
+}
+
+internal fun parseVoiceBookkeepingText(text: String): ReceiptRecognitionResult? {
+    val cleanedText = text.replace('\n', ' ').trim()
+    if (cleanedText.isBlank()) {
+        return null
+    }
+
+    val baseResult = parseReceiptText(cleanedText) ?: return null
+    val type = when {
+        voiceIncomeKeywords.any(cleanedText::contains) -> LedgerEntryType.INCOME
+        voiceExpenseKeywords.any(cleanedText::contains) -> LedgerEntryType.EXPENSE
+        else -> baseResult.type ?: LedgerEntryType.EXPENSE
+    }
+
+    return baseResult.copy(
+        account = guessAccount(cleanedText),
+        category = guessCategory(cleanedText, type),
+        type = type,
+        suggestedNote = cleanedText
     )
 }
 
@@ -100,6 +124,12 @@ private fun guessCategory(
     } ?: defaultCategoryFor(LedgerEntryType.EXPENSE)
 }
 
+private fun guessAccount(text: String): String {
+    return accountKeywordMap.entries.firstOrNull { (_, keywords) ->
+        keywords.any(text::contains)
+    }?.key ?: defaultLedgerAccount()
+}
+
 private fun parseAmountToken(token: String): Long? {
     val normalized = token.replace(",", "").replace("\u00a5", "")
     return normalized.toAmountInCents()
@@ -113,4 +143,25 @@ private val receiptAmountPriorityKeywords = listOf(
     "\u652f\u4ed8",
     "\u5e94\u4ed8",
     "\u91d1\u989d"
+)
+private val voiceExpenseKeywords = listOf(
+    "\u652f\u51fa",
+    "\u82b1\u4e86",
+    "\u4ed8\u4e86",
+    "\u652f\u4ed8",
+    "\u6d88\u8d39"
+)
+private val voiceIncomeKeywords = listOf(
+    "\u6536\u5165",
+    "\u6536\u4e86",
+    "\u5165\u8d26",
+    "\u5230\u8d26",
+    "\u6536\u6b3e",
+    "\u9000\u6b3e"
+)
+private val accountKeywordMap = mapOf(
+    "\u652f\u4ed8\u5b9d" to listOf("\u652f\u4ed8\u5b9d", "\u4f59\u989d\u5b9d"),
+    "\u5fae\u4fe1" to listOf("\u5fae\u4fe1", "\u5fae\u4fe1\u652f\u4ed8"),
+    "\u94f6\u884c\u5361" to listOf("\u94f6\u884c\u5361", "\u50a8\u84c4\u5361", "\u4fe1\u7528\u5361"),
+    "\u73b0\u91d1" to listOf("\u73b0\u91d1")
 )

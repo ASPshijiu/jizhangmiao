@@ -1,9 +1,11 @@
 package com.android.jizhangmiao.ledger
 
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
+import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.LedgerAppSettings
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
 import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
 import com.android.jizhangmiao.ledger.data.ledgerAccountSuggestions
@@ -161,6 +163,8 @@ data class LedgerUiState(
     val entries: List<LedgerEntry> = emptyList(),
     val templates: List<LedgerTemplate> = emptyList(),
     val budgetConfig: LedgerBudgetConfig = LedgerBudgetConfig(),
+    val settings: LedgerAppSettings = LedgerAppSettings(),
+    val automationTrace: LedgerAutomationTrace = LedgerAutomationTrace(),
     val form: LedgerFormState = LedgerFormState(),
     val statusMessage: String? = null,
     val isReceiptScanning: Boolean = false

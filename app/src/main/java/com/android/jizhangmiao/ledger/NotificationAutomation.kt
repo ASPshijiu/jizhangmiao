@@ -15,6 +15,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
 import com.android.jizhangmiao.ledger.data.sanitizeAmountInput
 import com.android.jizhangmiao.ledger.data.toAmountInCents
+import com.android.jizhangmiao.ledger.data.toAmountInput
 import java.security.MessageDigest
 import java.util.Locale
 
@@ -22,10 +23,17 @@ internal const val WeChatPackageName = "com.tencent.mm"
 internal const val AlipayPackageName = "com.eg.android.AlipayGphone"
 
 internal data class NotificationAutomationStatus(
+    val appNotificationsEnabled: Boolean,
     val notificationAccessEnabled: Boolean,
     val accessibilityAccessEnabled: Boolean,
     val isWeChatInstalled: Boolean,
     val isAlipayInstalled: Boolean
+)
+
+internal data class AutoImportAnalysis(
+    val candidate: AutoImportedEntry?,
+    val mergedText: String,
+    val statusSummary: String
 )
 
 internal data class AutoImportedEntry(
@@ -87,7 +95,9 @@ private val amountPatterns = listOf(
 )
 
 internal fun queryNotificationAutomationStatus(context: Context): NotificationAutomationStatus {
+    val notificationManager = NotificationManagerCompat.from(context)
     return NotificationAutomationStatus(
+        appNotificationsEnabled = notificationManager.areNotificationsEnabled(),
         notificationAccessEnabled = NotificationManagerCompat
             .getEnabledListenerPackages(context)
             .contains(context.packageName),
@@ -155,6 +165,34 @@ internal fun openAccessibilityAutomationSettings(context: Context) {
     }
 }
 
+internal fun openAppNotificationSettings(context: Context) {
+    val detailIntent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    runCatching {
+        context.startActivity(detailIntent)
+    }.recoverCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = android.net.Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
+    }.recoverCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
+    }.getOrElse { throwable ->
+        if (throwable !is ActivityNotFoundException) {
+            throw throwable
+        }
+    }
+}
+
 internal fun launchExternalPaymentApp(
     context: Context,
     packageName: String
@@ -173,14 +211,14 @@ internal fun parseAutoImportedEntry(sbn: StatusBarNotification): AutoImportedEnt
         ?.trim()
         .orEmpty()
 
-    return parseAutoImportedEntry(
+    return analyzeAutoImportedEntry(
         packageName = sbn.packageName,
         mergedText = collectNotificationText(notification),
         dedupeSeed = sbn.key,
         happenedAt = sbn.postTime.takeIf { it > 0L } ?: System.currentTimeMillis(),
         sourceLabel = "\u901a\u77e5",
         title = title
-    )
+    ).candidate
 }
 
 internal fun parseAutoImportedEntry(
@@ -191,32 +229,68 @@ internal fun parseAutoImportedEntry(
     sourceLabel: String,
     title: String = ""
 ): AutoImportedEntry? {
+    return analyzeAutoImportedEntry(
+        packageName = packageName,
+        mergedText = mergedText,
+        dedupeSeed = dedupeSeed,
+        happenedAt = happenedAt,
+        sourceLabel = sourceLabel,
+        title = title
+    ).candidate
+}
+
+internal fun analyzeAutoImportedEntry(
+    packageName: String,
+    mergedText: String,
+    dedupeSeed: String,
+    happenedAt: Long,
+    sourceLabel: String,
+    title: String = ""
+): AutoImportAnalysis {
     if (packageName != WeChatPackageName && packageName != AlipayPackageName) {
-        return null
+        return AutoImportAnalysis(
+            candidate = null,
+            mergedText = "",
+            statusSummary = "\u5ffd\u7565\u4e86\u975e\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u4e8b\u4ef6"
+        )
     }
 
     val normalizedReceiptText = normalizeCollectedText(
         mergedText.lineSequence().toList()
     )
     if (normalizedReceiptText.isBlank()) {
-        return null
+        return AutoImportAnalysis(
+            candidate = null,
+            mergedText = "",
+            statusSummary = buildTraceSummary(sourceNameFor(packageName), sourceLabel, "\u5df2\u6355\u83b7\u5230\u4e8b\u4ef6\uff0c\u4f46\u6ca1\u8bfb\u5230\u53ef\u7528\u6587\u5b57")
+        )
     }
 
     val normalizedContent = normalizeForMatching(normalizedReceiptText)
-    val type = detectEntryType(normalizedContent) ?: return null
-    val amountInCents = extractAmountInCents(normalizedReceiptText) ?: return null
-    val sourceName = if (packageName == WeChatPackageName) {
-        "\u5fae\u4fe1\u652f\u4ed8"
-    } else {
-        "\u652f\u4ed8\u5b9d"
-    }
+    val sourceName = sourceNameFor(packageName)
     val account = if (packageName == WeChatPackageName) {
         "\u5fae\u4fe1"
     } else {
         "\u652f\u4ed8\u5b9d"
     }
+    val type = detectEntryType(normalizedContent)
+    if (type == null) {
+        return AutoImportAnalysis(
+            candidate = null,
+            mergedText = normalizedReceiptText.take(400),
+            statusSummary = buildTraceSummary(sourceName, sourceLabel, "\u5df2\u8bfb\u5230\u9875\u9762/\u901a\u77e5\uff0c\u4f46\u6ca1\u5224\u65ad\u51fa\u6536\u5165\u6216\u652f\u51fa")
+        )
+    }
+    val amountInCents = extractAmountInCents(normalizedReceiptText)
+    if (amountInCents == null) {
+        return AutoImportAnalysis(
+            candidate = null,
+            mergedText = normalizedReceiptText.take(400),
+            statusSummary = buildTraceSummary(sourceName, sourceLabel, "\u5df2\u5224\u65ad\u51fa${type.displayName()}\uff0c\u4f46\u6ca1\u8bc6\u522b\u5230\u91d1\u989d")
+        )
+    }
 
-    return AutoImportedEntry(
+    val candidate = AutoImportedEntry(
         signature = sha256Hex(
             listOf(
                 packageName,
@@ -243,6 +317,16 @@ internal fun parseAutoImportedEntry(
         receiptText = normalizedReceiptText.take(400),
         happenedAt = happenedAt
     )
+
+    return AutoImportAnalysis(
+        candidate = candidate,
+        mergedText = normalizedReceiptText.take(400),
+        statusSummary = buildTraceSummary(
+            sourceName,
+            sourceLabel,
+            "\u5df2\u8bc6\u522b\u4e3a${type.displayName()} ${amountInCents.toAmountInput()}"
+        )
+    )
 }
 
 private fun canLaunchPackage(
@@ -268,7 +352,7 @@ private fun isAccessibilityAutomationEnabled(context: Context): Boolean {
         }
 }
 
-private fun collectNotificationText(notification: Notification): String {
+internal fun collectNotificationText(notification: Notification): String {
     val extras = notification.extras
     val rawTexts = mutableListOf<String>()
 
@@ -294,6 +378,14 @@ private fun collectNotificationText(notification: Notification): String {
     }
 
     return normalizeCollectedText(rawTexts)
+}
+
+private fun sourceNameFor(packageName: String): String {
+    return if (packageName == WeChatPackageName) {
+        "\u5fae\u4fe1\u652f\u4ed8"
+    } else {
+        "\u652f\u4ed8\u5b9d"
+    }
 }
 
 internal fun normalizeCollectedText(rawTexts: Iterable<String>): String {
@@ -378,4 +470,12 @@ private fun sha256Hex(value: String): String {
         .joinToString("") { byte ->
             "%02x".format(byte)
         }
+}
+
+private fun buildTraceSummary(
+    sourceName: String,
+    sourceLabel: String,
+    message: String
+): String {
+    return "$sourceName / $sourceLabel / $message"
 }

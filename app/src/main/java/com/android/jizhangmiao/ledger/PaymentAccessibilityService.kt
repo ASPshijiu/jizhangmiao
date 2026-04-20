@@ -65,15 +65,41 @@ class PaymentAccessibilityService : AccessibilityService() {
             return
         }
 
-        val mergedText = collectActiveWindowText(event) ?: return
         val happenedAt = System.currentTimeMillis()
-        val candidate = parseAutoImportedEntry(
+        val mergedText = collectActiveWindowText(event)
+        if (mergedText == null) {
+            serviceScope.launch {
+                LedgerStore.getInstance(applicationContext).recordAutomationTrace(
+                    com.android.jizhangmiao.ledger.data.LedgerAutomationTrace(
+                        sourceLabel = sourceLabel,
+                        summary = "\u5df2\u6536\u5230\u9875\u9762\u4e8b\u4ef6\uff0c\u4f46\u5f53\u524d\u6ca1\u8bfb\u5230\u53ef\u7528\u6587\u5b57",
+                        rawText = "",
+                        happenedAt = happenedAt
+                    )
+                )
+            }
+            return
+        }
+        val analysis = analyzeAutoImportedEntry(
             packageName = packageName,
             mergedText = mergedText,
             dedupeSeed = dedupeSeed,
             happenedAt = happenedAt,
             sourceLabel = sourceLabel
-        ) ?: return
+        )
+        val candidate = analysis.candidate ?: run {
+            serviceScope.launch {
+                LedgerStore.getInstance(applicationContext).recordAutomationTrace(
+                    com.android.jizhangmiao.ledger.data.LedgerAutomationTrace(
+                        sourceLabel = sourceLabel,
+                        summary = analysis.statusSummary,
+                        rawText = analysis.mergedText,
+                        happenedAt = happenedAt
+                    )
+                )
+            }
+            return
+        }
 
         if (
             candidate.signature == lastImportedSignature &&
@@ -85,7 +111,20 @@ class PaymentAccessibilityService : AccessibilityService() {
         lastImportedSignature = candidate.signature
         lastImportedAt = happenedAt
         serviceScope.launch {
-            LedgerStore.getInstance(applicationContext).importAutoEntry(candidate)
+            val store = LedgerStore.getInstance(applicationContext)
+            val imported = store.importAutoEntry(candidate)
+            store.recordAutomationTrace(
+                com.android.jizhangmiao.ledger.data.LedgerAutomationTrace(
+                    sourceLabel = sourceLabel,
+                    summary = if (imported) {
+                        "${analysis.statusSummary} / \u5df2\u5165\u8d26"
+                    } else {
+                        "${analysis.statusSummary} / \u91cd\u590d\u6216\u65e0\u9700\u5165\u8d26"
+                    },
+                    rawText = analysis.mergedText,
+                    happenedAt = happenedAt
+                )
+            )
         }
     }
 
@@ -97,8 +136,22 @@ class PaymentAccessibilityService : AccessibilityService() {
         event?.contentDescription
             ?.toString()
             ?.let(rawTexts::add)
+        traverseNodeTree(event?.source, rawTexts)
+        traverseNodeTree(rootInActiveWindow, rawTexts)
 
-        val rootNode = rootInActiveWindow ?: return normalizeCollectedText(rawTexts).takeIf(String::isNotBlank)
+        return normalizeCollectedText(rawTexts).takeIf { merged ->
+            merged.isNotBlank() && !TextUtils.isDigitsOnly(merged)
+        }
+    }
+
+    private fun traverseNodeTree(
+        rootNode: AccessibilityNodeInfo?,
+        rawTexts: MutableList<String>
+    ) {
+        if (rootNode == null) {
+            return
+        }
+
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(rootNode)
         var visitedCount = 0
@@ -113,16 +166,14 @@ class PaymentAccessibilityService : AccessibilityService() {
             }
             visitedCount += 1
         }
-
-        return normalizeCollectedText(rawTexts).takeIf { merged ->
-            merged.isNotBlank() && !TextUtils.isDigitsOnly(merged)
-        }
     }
 
     private companion object {
         val SupportedEventTypes = setOf(
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_SCROLLED
         )
 
