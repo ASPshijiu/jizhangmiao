@@ -9,14 +9,20 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.LedgerImportMode
+import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerStore
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
+import com.android.jizhangmiao.ledger.data.PendingLedgerImport
 import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
 import com.android.jizhangmiao.ledger.data.initialTemplateNextDueAt
 import com.android.jizhangmiao.ledger.data.sanitizeAmountInput
 import com.android.jizhangmiao.ledger.data.toAmountInCents
 import com.android.jizhangmiao.ledger.data.toAmountInput
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -33,12 +39,22 @@ class LedgerViewModel(
         val entries: List<LedgerEntry>,
         val templates: List<LedgerTemplate>,
         val budgetConfig: com.android.jizhangmiao.ledger.data.LedgerBudgetConfig,
-        val automationTrace: com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
+        val profileConfig: com.android.jizhangmiao.ledger.data.LedgerProfileConfig,
+        val automationTrace: com.android.jizhangmiao.ledger.data.LedgerAutomationTrace,
+        val pendingImports: List<PendingLedgerImport>,
+        val securityConfig: LedgerSecurityConfig
+    )
+
+    private data class UiMeta(
+        val automationTrace: com.android.jizhangmiao.ledger.data.LedgerAutomationTrace,
+        val pendingImports: List<PendingLedgerImport>,
+        val securityConfig: LedgerSecurityConfig
     )
 
     private val formState = MutableStateFlow(LedgerFormState())
     private val statusMessage = MutableStateFlow<String?>(null)
     private val scanningState = MutableStateFlow(false)
+    private val lockState = MutableStateFlow(ledgerStore.securityConfig.value.isPinEnabled)
 
     init {
         viewModelScope.launch {
@@ -54,28 +70,57 @@ class LedgerViewModel(
             ledgerStore.entries,
             ledgerStore.templates,
             ledgerStore.budgetConfig,
-            ledgerStore.automationTrace
-        ) { entries, templates, budgetConfig, automationTrace ->
+            ledgerStore.profileConfig
+        ) { entries, templates, budgetConfig, profileConfig ->
             UiSeed(
                 entries = entries,
                 templates = templates,
                 budgetConfig = budgetConfig,
-                automationTrace = automationTrace
+                profileConfig = profileConfig,
+                automationTrace = ledgerStore.automationTrace.value,
+                pendingImports = ledgerStore.pendingImports.value,
+                securityConfig = ledgerStore.securityConfig.value
             )
         },
-        formState,
-        statusMessage,
-        scanningState
-    ) { seed, form, message, isScanning ->
-        LedgerUiState(
-            entries = seed.entries,
-            templates = seed.templates,
-            budgetConfig = seed.budgetConfig,
-            automationTrace = seed.automationTrace,
-            form = form,
-            statusMessage = message,
-            isReceiptScanning = isScanning
+        combine(
+            ledgerStore.automationTrace,
+            ledgerStore.pendingImports,
+            ledgerStore.securityConfig
+        ) { automationTrace, pendingImports, securityConfig ->
+            UiMeta(
+                automationTrace = automationTrace,
+                pendingImports = pendingImports,
+                securityConfig = securityConfig
+            )
+        }
+    ) { seed, meta ->
+        seed.copy(
+            automationTrace = meta.automationTrace,
+            pendingImports = meta.pendingImports,
+            securityConfig = meta.securityConfig
         )
+    }.let { seedFlow ->
+        combine(
+            seedFlow,
+            formState,
+            statusMessage,
+            scanningState,
+            lockState
+        ) { seed, form, message, isScanning, isLocked ->
+            LedgerUiState(
+                entries = seed.entries,
+                templates = seed.templates,
+                budgetConfig = seed.budgetConfig,
+                profileConfig = seed.profileConfig,
+                automationTrace = seed.automationTrace,
+                pendingImports = seed.pendingImports,
+                securityConfig = seed.securityConfig,
+                isLocked = seed.securityConfig.isPinEnabled && isLocked,
+                form = form,
+                statusMessage = message,
+                isReceiptScanning = isScanning
+            )
+        }
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -310,6 +355,58 @@ class LedgerViewModel(
         }
     }
 
+    fun approvePendingImport(pendingImport: PendingLedgerImport) {
+        viewModelScope.launch {
+            ledgerStore.approvePendingImport(pendingImport)
+            statusMessage.value = "\u5df2\u786e\u8ba4\u8fd9\u7b14\u81ea\u52a8\u8bb0\u8d26"
+        }
+    }
+
+    fun ignorePendingImport(pendingImport: PendingLedgerImport) {
+        viewModelScope.launch {
+            ledgerStore.ignorePendingImport(pendingImport)
+            statusMessage.value = "\u5df2\u5ffd\u7565\u8fd9\u6761\u81ea\u52a8\u8bb0\u8d26\u5019\u9009"
+        }
+    }
+
+    fun addAccount(account: String) {
+        viewModelScope.launch {
+            ledgerStore.addAccount(account)
+            statusMessage.value = "\u8d26\u6237\u5df2\u52a0\u5165\u5e38\u7528\u5217\u8868"
+        }
+    }
+
+    fun addCategory(
+        type: LedgerEntryType,
+        category: String
+    ) {
+        viewModelScope.launch {
+            ledgerStore.addCategory(type, category)
+            statusMessage.value = "\u5206\u7c7b\u5df2\u52a0\u5165\u5e38\u7528\u5217\u8868"
+        }
+    }
+
+    fun renameAccount(
+        oldAccount: String,
+        newAccount: String
+    ) {
+        viewModelScope.launch {
+            ledgerStore.renameAccount(oldAccount, newAccount)
+            statusMessage.value = "\u8d26\u6237\u5df2\u91cd\u547d\u540d"
+        }
+    }
+
+    fun renameCategory(
+        type: LedgerEntryType,
+        oldCategory: String,
+        newCategory: String
+    ) {
+        viewModelScope.launch {
+            ledgerStore.renameCategory(type, oldCategory, newCategory)
+            statusMessage.value = "\u5206\u7c7b\u5df2\u91cd\u547d\u540d"
+        }
+    }
+
     fun saveBudget(
         monthlyBudgetInput: String,
         category: String,
@@ -349,22 +446,59 @@ class LedgerViewModel(
         }
     }
 
-    fun importBackup(uri: Uri) {
+    fun exportCsv(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                appContext.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { writer ->
+                    writer.write(ledgerStore.exportCsv())
+                } ?: error("Unable to open output stream")
+            }.onSuccess {
+                statusMessage.value = "CSV \u5df2\u5bfc\u51fa"
+            }.onFailure {
+                statusMessage.value = "CSV \u5bfc\u51fa\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5"
+            }
+        }
+    }
+
+    fun previewBackup(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                val backupJson = appContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { reader ->
+                    reader.readText()
+                } ?: error("Unable to open input stream")
+                ledgerStore.previewBackupJson(backupJson)
+            }.onSuccess { preview ->
+                statusMessage.value = if (preview == null) {
+                    "\u5907\u4efd\u683c\u5f0f\u4e0d\u6b63\u786e"
+                } else {
+                    "\u5907\u4efd\u9884\u89c8\uff1a${preview.entriesCount} \u7b14\u8bb0\u5f55\u3001${preview.templatesCount} \u4e2a\u6a21\u677f\u3001${preview.categoryBudgetCount} \u4e2a\u5206\u7c7b\u9884\u7b97"
+                }
+            }.onFailure {
+                statusMessage.value = "\u9884\u89c8\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u6587\u4ef6"
+            }
+        }
+    }
+
+    fun importBackup(
+        uri: Uri,
+        mode: LedgerImportMode = LedgerImportMode.REPLACE
+    ) {
         viewModelScope.launch {
             runCatching {
                 val backupJson = appContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { reader ->
                     reader.readText()
                 } ?: error("Unable to open input stream")
 
-                ledgerStore.importBackupJson(backupJson)
+                ledgerStore.importBackupJson(backupJson, mode)
             }.onSuccess { imported ->
                 if (imported) {
                     val generatedCount = ledgerStore.syncRecurringTemplates()
                     resetForm()
+                    val actionText = if (mode == LedgerImportMode.MERGE) "\u5df2\u5408\u5e76\u5bfc\u5165" else "\u5df2\u8986\u76d6\u5bfc\u5165"
                     statusMessage.value = if (generatedCount > 0) {
-                        "\u5907\u4efd\u5df2\u5bfc\u5165\uff0c\u5e76\u8865\u5165 $generatedCount \u7b14\u5468\u671f\u8d26\u5355"
+                        "$actionText\uff0c\u5e76\u8865\u5165 $generatedCount \u7b14\u5468\u671f\u8d26\u5355"
                     } else {
-                        "\u5907\u4efd\u5df2\u5bfc\u5165"
+                        actionText
                     }
                 } else {
                     statusMessage.value = "\u5907\u4efd\u683c\u5f0f\u4e0d\u6b63\u786e"
@@ -372,6 +506,56 @@ class LedgerViewModel(
             }.onFailure {
                 statusMessage.value = "\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u6587\u4ef6"
             }
+        }
+    }
+
+    fun unlockWithPin(pin: String) {
+        val securityConfig = ledgerStore.securityConfig.value
+        if (!securityConfig.isPinEnabled) {
+            lockState.value = false
+            return
+        }
+
+        if (hashPin(pin, securityConfig.pinSalt) == securityConfig.pinHash) {
+            lockState.value = false
+            statusMessage.value = "\u5df2\u89e3\u9501"
+        } else {
+            statusMessage.value = "PIN \u4e0d\u6b63\u786e"
+        }
+    }
+
+    fun lockNow() {
+        if (ledgerStore.securityConfig.value.isPinEnabled) {
+            lockState.value = true
+            statusMessage.value = "\u5df2\u9501\u5b9a"
+        }
+    }
+
+    fun setPin(pin: String) {
+        val normalizedPin = pin.trim()
+        if (normalizedPin.length < 4) {
+            statusMessage.value = "PIN \u81f3\u5c11\u9700\u8981 4 \u4f4d"
+            return
+        }
+
+        viewModelScope.launch {
+            val salt = generateSalt()
+            ledgerStore.updateSecurityConfig(
+                LedgerSecurityConfig(
+                    pinHash = hashPin(normalizedPin, salt),
+                    pinSalt = salt
+                )
+            )
+            lockState.value = false
+            statusMessage.value = "\u9690\u79c1\u9501\u5df2\u5f00\u542f"
+        }
+    }
+
+    fun disablePin() {
+        viewModelScope.launch {
+            ledgerStore.updateSecurityConfig(LedgerSecurityConfig())
+            lockState.value = false
+            statusMessage.value = "\u9690\u79c1\u9501\u5df2\u5173\u95ed"
         }
     }
 
@@ -421,6 +605,21 @@ class LedgerViewModel(
             account = defaultLedgerAccount(),
             category = defaultCategoryFor(type)
         )
+    }
+
+    private fun generateSalt(): String {
+        val bytes = ByteArray(16)
+        SecureRandom().nextBytes(bytes)
+        return Base64.getEncoder().encodeToString(bytes)
+    }
+
+    private fun hashPin(
+        pin: String,
+        salt: String
+    ): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest("$salt:$pin".toByteArray())
+            .joinToString("") { byte -> "%02x".format(byte) }
     }
 
     companion object {

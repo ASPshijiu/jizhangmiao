@@ -56,6 +56,12 @@ data class LedgerBudgetConfig(
     val categoryBudgets: Map<String, Long> = emptyMap()
 )
 
+data class LedgerProfileConfig(
+    val customAccounts: List<String> = emptyList(),
+    val customExpenseCategories: List<String> = emptyList(),
+    val customIncomeCategories: List<String> = emptyList()
+)
+
 data class LedgerAutomationTrace(
     val sourceLabel: String = "",
     val summary: String = "",
@@ -64,6 +70,39 @@ data class LedgerAutomationTrace(
 ) {
     val isAvailable: Boolean
         get() = happenedAt > 0L
+}
+
+data class PendingLedgerImport(
+    val id: String = UUID.randomUUID().toString(),
+    val signature: String,
+    val type: LedgerEntryType,
+    val amountInCents: Long,
+    val account: String = defaultLedgerAccount(),
+    val category: String,
+    val note: String = "",
+    val receiptText: String = "",
+    val happenedAt: Long,
+    val sourceLabel: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+data class LedgerSecurityConfig(
+    val pinHash: String = "",
+    val pinSalt: String = ""
+) {
+    val isPinEnabled: Boolean
+        get() = pinHash.isNotBlank() && pinSalt.isNotBlank()
+}
+
+data class BackupPreview(
+    val entriesCount: Int,
+    val templatesCount: Int,
+    val categoryBudgetCount: Int
+)
+
+enum class LedgerImportMode {
+    REPLACE,
+    MERGE
 }
 
 fun sanitizeAmountInput(value: String): String {

@@ -56,8 +56,20 @@ class MainActivity : ComponentActivity() {
                     onDeleteTemplateClick = viewModel::deleteTemplate,
                     onSaveBudgetClick = viewModel::saveBudget,
                     onExportBackup = viewModel::exportBackup,
+                    onExportCsv = viewModel::exportCsv,
+                    onPreviewBackup = viewModel::previewBackup,
                     onImportBackup = viewModel::importBackup,
                     onScanReceipt = viewModel::scanReceipt,
+                    onApprovePendingImport = viewModel::approvePendingImport,
+                    onIgnorePendingImport = viewModel::ignorePendingImport,
+                    onAddAccount = viewModel::addAccount,
+                    onAddCategory = viewModel::addCategory,
+                    onRenameAccount = viewModel::renameAccount,
+                    onRenameCategory = viewModel::renameCategory,
+                    onUnlockPin = viewModel::unlockWithPin,
+                    onSetPin = viewModel::setPin,
+                    onDisablePin = viewModel::disablePin,
+                    onLockNow = viewModel::lockNow,
                     onDismissStatusMessage = viewModel::dismissStatusMessage
                 )
             }

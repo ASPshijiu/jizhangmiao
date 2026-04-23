@@ -2,9 +2,12 @@ package com.android.jizhangmiao.ledger
 
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
 import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
+import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
+import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.PendingLedgerImport
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
 import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
 import com.android.jizhangmiao.ledger.data.ledgerAccountSuggestions
@@ -162,7 +165,11 @@ data class LedgerUiState(
     val entries: List<LedgerEntry> = emptyList(),
     val templates: List<LedgerTemplate> = emptyList(),
     val budgetConfig: LedgerBudgetConfig = LedgerBudgetConfig(),
+    val profileConfig: LedgerProfileConfig = LedgerProfileConfig(),
     val automationTrace: LedgerAutomationTrace = LedgerAutomationTrace(),
+    val pendingImports: List<PendingLedgerImport> = emptyList(),
+    val securityConfig: LedgerSecurityConfig = LedgerSecurityConfig(),
+    val isLocked: Boolean = false,
     val form: LedgerFormState = LedgerFormState(),
     val statusMessage: String? = null,
     val isReceiptScanning: Boolean = false

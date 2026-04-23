@@ -44,9 +44,9 @@ class PaymentNotificationListenerService : NotificationListenerService() {
             } else {
                 val imported = store.importAutoEntry(candidate)
                 if (imported) {
-                    "${analysis.statusSummary} / \u5df2\u5165\u8d26"
+                    "${analysis.statusSummary} / \u5df2\u8fdb\u5165\u5ba1\u6838\u7bb1"
                 } else {
-                    "${analysis.statusSummary} / \u91cd\u590d\u6216\u65e0\u9700\u5165\u8d26"
+                    "${analysis.statusSummary} / \u91cd\u590d\u6216\u65e0\u9700\u5ba1\u6838"
                 }
             }
             store.recordAutomationTrace(

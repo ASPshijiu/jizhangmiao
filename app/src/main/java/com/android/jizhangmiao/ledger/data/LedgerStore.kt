@@ -20,12 +20,18 @@ class LedgerStore private constructor(
     private val _entries = MutableStateFlow(loadEntries())
     private val _templates = MutableStateFlow(loadTemplates())
     private val _budgetConfig = MutableStateFlow(loadBudgetConfig())
+    private val _profileConfig = MutableStateFlow(loadProfileConfig())
     private val _automationTrace = MutableStateFlow(loadAutomationTrace())
+    private val _pendingImports = MutableStateFlow(loadPendingImports())
+    private val _securityConfig = MutableStateFlow(loadSecurityConfig())
 
     val entries: StateFlow<List<LedgerEntry>> = _entries.asStateFlow()
     val templates: StateFlow<List<LedgerTemplate>> = _templates.asStateFlow()
     val budgetConfig: StateFlow<LedgerBudgetConfig> = _budgetConfig.asStateFlow()
+    val profileConfig: StateFlow<LedgerProfileConfig> = _profileConfig.asStateFlow()
     val automationTrace: StateFlow<LedgerAutomationTrace> = _automationTrace.asStateFlow()
+    val pendingImports: StateFlow<List<PendingLedgerImport>> = _pendingImports.asStateFlow()
+    val securityConfig: StateFlow<LedgerSecurityConfig> = _securityConfig.asStateFlow()
 
     suspend fun addEntry(entry: LedgerEntry) {
         updateEntries { current ->
@@ -62,7 +68,10 @@ class LedgerStore private constructor(
         return withContext(Dispatchers.IO) {
             synchronized(writeLock) {
                 val signatures = loadAutoImportHistory().toMutableList()
-                if (signatures.contains(entry.signature)) {
+                val isAlreadyPending = _pendingImports.value.any { pending ->
+                    pending.signature == entry.signature
+                }
+                if (signatures.contains(entry.signature) || isAlreadyPending) {
                     return@withContext false
                 }
 
@@ -80,8 +89,9 @@ class LedgerStore private constructor(
                     return@withContext false
                 }
 
-                val updatedEntries = normalizeEntries(
-                    _entries.value + LedgerEntry(
+                val updatedPendingImports = normalizePendingImports(
+                    _pendingImports.value + PendingLedgerImport(
+                        signature = entry.signature,
                         type = entry.type,
                         amountInCents = entry.amountInCents,
                         account = entry.account,
@@ -89,12 +99,49 @@ class LedgerStore private constructor(
                         note = entry.note,
                         receiptText = entry.receiptText,
                         happenedAt = entry.happenedAt,
-                        updatedAt = entry.happenedAt
+                        sourceLabel = entry.note
                     )
                 )
-                persistEntries(updatedEntries)
-                _entries.value = updatedEntries
+                persistPendingImports(updatedPendingImports)
+                _pendingImports.value = updatedPendingImports
                 true
+            }
+        }
+    }
+
+    suspend fun approvePendingImport(pendingImport: PendingLedgerImport) {
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                val updatedEntries = normalizeEntries(
+                    _entries.value + LedgerEntry(
+                        type = pendingImport.type,
+                        amountInCents = pendingImport.amountInCents,
+                        account = pendingImport.account.ifBlank { defaultLedgerAccount() },
+                        category = pendingImport.category,
+                        note = pendingImport.note,
+                        receiptText = pendingImport.receiptText,
+                        happenedAt = pendingImport.happenedAt,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                val updatedPendingImports = _pendingImports.value
+                    .filterNot { savedImport -> savedImport.id == pendingImport.id }
+
+                persistEntries(updatedEntries)
+                persistPendingImports(updatedPendingImports)
+                _entries.value = updatedEntries
+                _pendingImports.value = updatedPendingImports
+            }
+        }
+    }
+
+    suspend fun ignorePendingImport(pendingImport: PendingLedgerImport) {
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                val updatedPendingImports = _pendingImports.value
+                    .filterNot { savedImport -> savedImport.id == pendingImport.id }
+                persistPendingImports(updatedPendingImports)
+                _pendingImports.value = updatedPendingImports
             }
         }
     }
@@ -138,6 +185,178 @@ class LedgerStore private constructor(
         }
     }
 
+    suspend fun addAccount(account: String) {
+        val normalizedAccount = account.trim().take(12)
+        if (normalizedAccount.isBlank()) {
+            return
+        }
+
+        updateProfileConfig { current ->
+            current.copy(
+                customAccounts = (current.customAccounts + normalizedAccount)
+                    .distinct()
+                    .sorted()
+            )
+        }
+    }
+
+    suspend fun addCategory(
+        type: LedgerEntryType,
+        category: String
+    ) {
+        val normalizedCategory = category.trim().take(12)
+        if (normalizedCategory.isBlank()) {
+            return
+        }
+
+        updateProfileConfig { current ->
+            when (type) {
+                LedgerEntryType.EXPENSE -> current.copy(
+                    customExpenseCategories = (current.customExpenseCategories + normalizedCategory)
+                        .distinct()
+                        .sorted()
+                )
+
+                LedgerEntryType.INCOME -> current.copy(
+                    customIncomeCategories = (current.customIncomeCategories + normalizedCategory)
+                        .distinct()
+                        .sorted()
+                )
+            }
+        }
+    }
+
+    suspend fun renameAccount(
+        oldAccount: String,
+        newAccount: String
+    ) {
+        val oldValue = oldAccount.trim()
+        val newValue = newAccount.trim().take(12)
+        if (oldValue.isBlank() || newValue.isBlank() || oldValue == newValue) {
+            return
+        }
+
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                val updatedEntries = normalizeEntries(
+                    _entries.value.map { entry ->
+                        if (entry.account == oldValue) entry.copy(account = newValue) else entry
+                    }
+                )
+                val updatedTemplates = normalizeTemplates(
+                    _templates.value.map { template ->
+                        if (template.account == oldValue) template.copy(account = newValue) else template
+                    }
+                )
+                val updatedPendingImports = normalizePendingImports(
+                    _pendingImports.value.map { pendingImport ->
+                        if (pendingImport.account == oldValue) pendingImport.copy(account = newValue) else pendingImport
+                    }
+                )
+                val updatedProfile = _profileConfig.value.copy(
+                    customAccounts = (_profileConfig.value.customAccounts
+                        .map { account -> if (account == oldValue) newValue else account } + newValue)
+                        .distinct()
+                        .sorted()
+                )
+
+                persistEntries(updatedEntries)
+                persistTemplates(updatedTemplates)
+                persistPendingImports(updatedPendingImports)
+                persistProfileConfig(updatedProfile)
+                _entries.value = updatedEntries
+                _templates.value = updatedTemplates
+                _pendingImports.value = updatedPendingImports
+                _profileConfig.value = updatedProfile
+            }
+        }
+    }
+
+    suspend fun renameCategory(
+        type: LedgerEntryType,
+        oldCategory: String,
+        newCategory: String
+    ) {
+        val oldValue = oldCategory.trim()
+        val newValue = newCategory.trim().take(12)
+        if (oldValue.isBlank() || newValue.isBlank() || oldValue == newValue) {
+            return
+        }
+
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                val updatedEntries = normalizeEntries(
+                    _entries.value.map { entry ->
+                        if (entry.type == type && entry.category == oldValue) {
+                            entry.copy(category = newValue)
+                        } else {
+                            entry
+                        }
+                    }
+                )
+                val updatedTemplates = normalizeTemplates(
+                    _templates.value.map { template ->
+                        if (template.type == type && template.category == oldValue) {
+                            template.copy(category = newValue)
+                        } else {
+                            template
+                        }
+                    }
+                )
+                val updatedPendingImports = normalizePendingImports(
+                    _pendingImports.value.map { pendingImport ->
+                        if (pendingImport.type == type && pendingImport.category == oldValue) {
+                            pendingImport.copy(category = newValue)
+                        } else {
+                            pendingImport
+                        }
+                    }
+                )
+                val updatedBudgets = _budgetConfig.value.categoryBudgets
+                    .mapKeys { (category, _) ->
+                        if (category == oldValue) newValue else category
+                    }
+                    .toSortedMap()
+                val updatedBudgetConfig = _budgetConfig.value.copy(categoryBudgets = updatedBudgets)
+                val updatedProfile = when (type) {
+                    LedgerEntryType.EXPENSE -> _profileConfig.value.copy(
+                        customExpenseCategories = (_profileConfig.value.customExpenseCategories
+                            .map { category -> if (category == oldValue) newValue else category } + newValue)
+                            .distinct()
+                            .sorted()
+                    )
+
+                    LedgerEntryType.INCOME -> _profileConfig.value.copy(
+                        customIncomeCategories = (_profileConfig.value.customIncomeCategories
+                            .map { category -> if (category == oldValue) newValue else category } + newValue)
+                            .distinct()
+                            .sorted()
+                    )
+                }
+
+                persistEntries(updatedEntries)
+                persistTemplates(updatedTemplates)
+                persistPendingImports(updatedPendingImports)
+                persistBudgetConfig(updatedBudgetConfig)
+                persistProfileConfig(updatedProfile)
+                _entries.value = updatedEntries
+                _templates.value = updatedTemplates
+                _pendingImports.value = updatedPendingImports
+                _budgetConfig.value = updatedBudgetConfig
+                _profileConfig.value = updatedProfile
+            }
+        }
+    }
+
+    suspend fun updateSecurityConfig(config: LedgerSecurityConfig) {
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                persistSecurityConfig(config)
+                _securityConfig.value = config
+            }
+        }
+    }
+
     suspend fun recordAutomationTrace(trace: LedgerAutomationTrace) {
         withContext(Dispatchers.IO) {
             synchronized(writeLock) {
@@ -149,12 +368,39 @@ class LedgerStore private constructor(
 
     fun exportBackupJson(): String {
         return JSONObject().apply {
-            put("version", 2)
+            put("version", 3)
             put("exportedAt", System.currentTimeMillis())
             put("entries", encodeEntries(_entries.value))
             put("templates", encodeTemplates(_templates.value))
             put("budgetConfig", encodeBudgetConfig(_budgetConfig.value))
+            put("profileConfig", encodeProfileConfig(_profileConfig.value))
         }.toString(2)
+    }
+
+    fun exportCsv(): String {
+        val header = listOf(
+            "id",
+            "type",
+            "amount",
+            "account",
+            "category",
+            "note",
+            "happenedAt",
+            "updatedAt"
+        ).joinToString(",")
+        val rows = _entries.value.map { entry ->
+            listOf(
+                entry.id,
+                entry.type.name,
+                entry.amountInCents.toAmountInput(),
+                entry.account,
+                entry.category,
+                entry.note,
+                entry.happenedAt.toString(),
+                entry.updatedAt.toString()
+            ).joinToString(",") { value -> csvEscape(value) }
+        }
+        return (listOf(header) + rows).joinToString("\n")
     }
 
     suspend fun syncRecurringTemplates(now: Long = System.currentTimeMillis()): Int {
@@ -180,7 +426,25 @@ class LedgerStore private constructor(
         }
     }
 
-    suspend fun importBackupJson(json: String): Boolean {
+    fun previewBackupJson(json: String): BackupPreview? {
+        return runCatching {
+            val backup = JSONObject(json)
+            BackupPreview(
+                entriesCount = backup.optJSONArray("entries")?.length() ?: 0,
+                templatesCount = backup.optJSONArray("templates")?.length() ?: 0,
+                categoryBudgetCount = backup
+                    .optJSONObject("budgetConfig")
+                    ?.optJSONObject("categoryBudgets")
+                    ?.length()
+                    ?: 0
+            )
+        }.getOrNull()
+    }
+
+    suspend fun importBackupJson(
+        json: String,
+        mode: LedgerImportMode = LedgerImportMode.REPLACE
+    ): Boolean {
         return withContext(Dispatchers.IO) {
             synchronized(writeLock) {
                 runCatching {
@@ -188,14 +452,46 @@ class LedgerStore private constructor(
                     val importedEntries = decodeEntries(backup.optJSONArray("entries"))
                     val importedTemplates = decodeTemplates(backup.optJSONArray("templates"))
                     val importedBudgetConfig = decodeBudgetConfig(backup.optJSONObject("budgetConfig"))
+                    val importedProfileConfig = decodeProfileConfig(backup.optJSONObject("profileConfig"))
 
-                    persistEntries(importedEntries)
-                    persistTemplates(importedTemplates)
-                    persistBudgetConfig(importedBudgetConfig)
+                    val updatedEntries = when (mode) {
+                        LedgerImportMode.REPLACE -> importedEntries
+                        LedgerImportMode.MERGE -> mergeEntries(_entries.value, importedEntries)
+                    }
+                    val updatedTemplates = when (mode) {
+                        LedgerImportMode.REPLACE -> importedTemplates
+                        LedgerImportMode.MERGE -> mergeTemplates(_templates.value, importedTemplates)
+                    }
+                    val updatedBudgetConfig = when (mode) {
+                        LedgerImportMode.REPLACE -> importedBudgetConfig
+                        LedgerImportMode.MERGE -> _budgetConfig.value.copy(
+                            monthlyBudgetInCents = importedBudgetConfig.monthlyBudgetInCents
+                                ?: _budgetConfig.value.monthlyBudgetInCents,
+                            categoryBudgets = (_budgetConfig.value.categoryBudgets +
+                                importedBudgetConfig.categoryBudgets).toSortedMap()
+                        )
+                    }
+                    val updatedProfileConfig = when (mode) {
+                        LedgerImportMode.REPLACE -> importedProfileConfig
+                        LedgerImportMode.MERGE -> LedgerProfileConfig(
+                            customAccounts = (_profileConfig.value.customAccounts +
+                                importedProfileConfig.customAccounts).distinct().sorted(),
+                            customExpenseCategories = (_profileConfig.value.customExpenseCategories +
+                                importedProfileConfig.customExpenseCategories).distinct().sorted(),
+                            customIncomeCategories = (_profileConfig.value.customIncomeCategories +
+                                importedProfileConfig.customIncomeCategories).distinct().sorted()
+                        )
+                    }
 
-                    _entries.value = importedEntries
-                    _templates.value = importedTemplates
-                    _budgetConfig.value = importedBudgetConfig
+                    persistEntries(updatedEntries)
+                    persistTemplates(updatedTemplates)
+                    persistBudgetConfig(updatedBudgetConfig)
+                    persistProfileConfig(updatedProfileConfig)
+
+                    _entries.value = updatedEntries
+                    _templates.value = updatedTemplates
+                    _budgetConfig.value = updatedBudgetConfig
+                    _profileConfig.value = updatedProfileConfig
                 }.isSuccess
             }
         }
@@ -233,6 +529,18 @@ class LedgerStore private constructor(
                 val updatedConfig = transform(_budgetConfig.value)
                 persistBudgetConfig(updatedConfig)
                 _budgetConfig.value = updatedConfig
+            }
+        }
+    }
+
+    private suspend fun updateProfileConfig(
+        transform: (LedgerProfileConfig) -> LedgerProfileConfig
+    ) {
+        withContext(Dispatchers.IO) {
+            synchronized(writeLock) {
+                val updatedConfig = transform(_profileConfig.value)
+                persistProfileConfig(updatedConfig)
+                _profileConfig.value = updatedConfig
             }
         }
     }
@@ -276,6 +584,19 @@ class LedgerStore private constructor(
         }
     }
 
+    private fun loadProfileConfig(): LedgerProfileConfig {
+        val rawValue = preferences.getString(KEY_PROFILE_CONFIG, null).orEmpty()
+        if (rawValue.isBlank()) {
+            return LedgerProfileConfig()
+        }
+
+        return runCatching {
+            decodeProfileConfig(JSONObject(rawValue))
+        }.getOrElse {
+            LedgerProfileConfig()
+        }
+    }
+
     private fun loadAutomationTrace(): LedgerAutomationTrace {
         val rawValue = preferences.getString(KEY_AUTOMATION_TRACE, null).orEmpty()
         if (rawValue.isBlank()) {
@@ -286,6 +607,32 @@ class LedgerStore private constructor(
             decodeAutomationTrace(JSONObject(rawValue))
         }.getOrElse {
             LedgerAutomationTrace()
+        }
+    }
+
+    private fun loadPendingImports(): List<PendingLedgerImport> {
+        val rawValue = preferences.getString(KEY_PENDING_IMPORTS, null).orEmpty()
+        if (rawValue.isBlank()) {
+            return emptyList()
+        }
+
+        return runCatching {
+            decodePendingImports(JSONArray(rawValue))
+        }.getOrElse {
+            emptyList()
+        }
+    }
+
+    private fun loadSecurityConfig(): LedgerSecurityConfig {
+        val rawValue = preferences.getString(KEY_SECURITY_CONFIG, null).orEmpty()
+        if (rawValue.isBlank()) {
+            return LedgerSecurityConfig()
+        }
+
+        return runCatching {
+            decodeSecurityConfig(JSONObject(rawValue))
+        }.getOrElse {
+            LedgerSecurityConfig()
         }
     }
 
@@ -325,6 +672,41 @@ class LedgerStore private constructor(
         )
     }
 
+    private fun normalizePendingImports(pendingImports: List<PendingLedgerImport>): List<PendingLedgerImport> {
+        return pendingImports.sortedWith(
+            compareByDescending<PendingLedgerImport> { it.createdAt }
+                .thenByDescending { it.happenedAt }
+                .thenByDescending { it.id }
+        )
+    }
+
+    private fun mergeEntries(
+        existingEntries: List<LedgerEntry>,
+        importedEntries: List<LedgerEntry>
+    ): List<LedgerEntry> {
+        val existingIds = existingEntries.map { entry -> entry.id }.toSet()
+        val merged = existingEntries + importedEntries.filterNot { entry ->
+            entry.id in existingIds || existingEntries.any { savedEntry ->
+                savedEntry.type == entry.type &&
+                    savedEntry.amountInCents == entry.amountInCents &&
+                    savedEntry.account == entry.account &&
+                    savedEntry.category == entry.category &&
+                    savedEntry.happenedAt == entry.happenedAt
+            }
+        }
+        return normalizeEntries(merged)
+    }
+
+    private fun mergeTemplates(
+        existingTemplates: List<LedgerTemplate>,
+        importedTemplates: List<LedgerTemplate>
+    ): List<LedgerTemplate> {
+        val existingIds = existingTemplates.map { template -> template.id }.toSet()
+        return normalizeTemplates(existingTemplates + importedTemplates.filterNot { template ->
+            template.id in existingIds
+        })
+    }
+
     private fun persistEntries(entries: List<LedgerEntry>) {
         preferences.edit()
             .putString(KEY_ENTRIES, encodeEntries(entries).toString())
@@ -343,9 +725,27 @@ class LedgerStore private constructor(
             .apply()
     }
 
+    private fun persistProfileConfig(config: LedgerProfileConfig) {
+        preferences.edit()
+            .putString(KEY_PROFILE_CONFIG, encodeProfileConfig(config).toString())
+            .apply()
+    }
+
     private fun persistAutomationTrace(trace: LedgerAutomationTrace) {
         preferences.edit()
             .putString(KEY_AUTOMATION_TRACE, encodeAutomationTrace(trace).toString())
+            .apply()
+    }
+
+    private fun persistPendingImports(pendingImports: List<PendingLedgerImport>) {
+        preferences.edit()
+            .putString(KEY_PENDING_IMPORTS, encodePendingImports(pendingImports).toString())
+            .apply()
+    }
+
+    private fun persistSecurityConfig(config: LedgerSecurityConfig) {
+        preferences.edit()
+            .putString(KEY_SECURITY_CONFIG, encodeSecurityConfig(config).toString())
             .apply()
     }
 
@@ -419,12 +819,58 @@ class LedgerStore private constructor(
         }
     }
 
+    private fun encodeProfileConfig(config: LedgerProfileConfig): JSONObject {
+        return JSONObject().apply {
+            put("customAccounts", encodeStringList(config.customAccounts))
+            put("customExpenseCategories", encodeStringList(config.customExpenseCategories))
+            put("customIncomeCategories", encodeStringList(config.customIncomeCategories))
+        }
+    }
+
     private fun encodeAutomationTrace(trace: LedgerAutomationTrace): JSONObject {
         return JSONObject().apply {
             put("sourceLabel", trace.sourceLabel)
             put("summary", trace.summary)
             put("rawText", trace.rawText)
             put("happenedAt", trace.happenedAt)
+        }
+    }
+
+    private fun encodePendingImports(pendingImports: List<PendingLedgerImport>): JSONArray {
+        return JSONArray().apply {
+            pendingImports.forEach { pendingImport ->
+                put(
+                    JSONObject().apply {
+                        put("id", pendingImport.id)
+                        put("signature", pendingImport.signature)
+                        put("type", pendingImport.type.name)
+                        put("amountInCents", pendingImport.amountInCents)
+                        put("account", pendingImport.account)
+                        put("category", pendingImport.category)
+                        put("note", pendingImport.note)
+                        put("receiptText", pendingImport.receiptText)
+                        put("happenedAt", pendingImport.happenedAt)
+                        put("sourceLabel", pendingImport.sourceLabel)
+                        put("createdAt", pendingImport.createdAt)
+                    }
+                )
+            }
+        }
+    }
+
+    private fun encodeSecurityConfig(config: LedgerSecurityConfig): JSONObject {
+        return JSONObject().apply {
+            put("pinHash", config.pinHash)
+            put("pinSalt", config.pinSalt)
+        }
+    }
+
+    private fun encodeStringList(values: List<String>): JSONArray {
+        return JSONArray().apply {
+            values
+                .filter { value -> value.isNotBlank() }
+                .distinct()
+                .forEach(::put)
         }
     }
 
@@ -506,6 +952,18 @@ class LedgerStore private constructor(
         )
     }
 
+    private fun decodeProfileConfig(jsonObject: JSONObject?): LedgerProfileConfig {
+        if (jsonObject == null) {
+            return LedgerProfileConfig()
+        }
+
+        return LedgerProfileConfig(
+            customAccounts = decodeStringList(jsonObject.optJSONArray("customAccounts")),
+            customExpenseCategories = decodeStringList(jsonObject.optJSONArray("customExpenseCategories")),
+            customIncomeCategories = decodeStringList(jsonObject.optJSONArray("customIncomeCategories"))
+        )
+    }
+
     private fun decodeAutomationTrace(jsonObject: JSONObject?): LedgerAutomationTrace {
         if (jsonObject == null) {
             return LedgerAutomationTrace()
@@ -519,12 +977,77 @@ class LedgerStore private constructor(
         )
     }
 
+    private fun decodePendingImports(jsonArray: JSONArray?): List<PendingLedgerImport> {
+        if (jsonArray == null) {
+            return emptyList()
+        }
+
+        return buildList {
+            for (index in 0 until jsonArray.length()) {
+                val item = jsonArray.getJSONObject(index)
+                add(
+                    PendingLedgerImport(
+                        id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
+                        signature = item.optString("signature"),
+                        type = LedgerEntryType.valueOf(item.getString("type")),
+                        amountInCents = item.getLong("amountInCents"),
+                        account = item.optString("account").ifBlank { defaultLedgerAccount() },
+                        category = item.getString("category"),
+                        note = item.optString("note"),
+                        receiptText = item.optString("receiptText"),
+                        happenedAt = item.optLong("happenedAt", System.currentTimeMillis()),
+                        sourceLabel = item.optString("sourceLabel"),
+                        createdAt = item.optLong("createdAt", System.currentTimeMillis())
+                    )
+                )
+            }
+        }.let(::normalizePendingImports)
+    }
+
+    private fun decodeSecurityConfig(jsonObject: JSONObject?): LedgerSecurityConfig {
+        if (jsonObject == null) {
+            return LedgerSecurityConfig()
+        }
+
+        return LedgerSecurityConfig(
+            pinHash = jsonObject.optString("pinHash"),
+            pinSalt = jsonObject.optString("pinSalt")
+        )
+    }
+
+    private fun decodeStringList(jsonArray: JSONArray?): List<String> {
+        if (jsonArray == null) {
+            return emptyList()
+        }
+
+        return buildList {
+            for (index in 0 until jsonArray.length()) {
+                val value = jsonArray.optString(index).trim()
+                if (value.isNotBlank()) {
+                    add(value)
+                }
+            }
+        }.distinct().sorted()
+    }
+
+    private fun csvEscape(value: String): String {
+        val escaped = value.replace("\"", "\"\"")
+        return if (escaped.any { char -> char == ',' || char == '"' || char == '\n' || char == '\r' }) {
+            "\"$escaped\""
+        } else {
+            escaped
+        }
+    }
+
     companion object {
         private const val PREFS_NAME = "ledger_store"
         private const val KEY_ENTRIES = "entries"
         private const val KEY_TEMPLATES = "templates"
         private const val KEY_BUDGET_CONFIG = "budget_config"
+        private const val KEY_PROFILE_CONFIG = "profile_config"
         private const val KEY_AUTOMATION_TRACE = "automation_trace"
+        private const val KEY_PENDING_IMPORTS = "pending_imports"
+        private const val KEY_SECURITY_CONFIG = "security_config"
         private const val KEY_AUTO_IMPORT_HISTORY = "auto_import_history"
         private const val MAX_AUTO_IMPORT_HISTORY = 80
         private const val AUTO_IMPORT_WINDOW_MILLIS = 2 * 60 * 1000L

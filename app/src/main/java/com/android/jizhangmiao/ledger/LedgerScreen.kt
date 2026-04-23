@@ -81,6 +81,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -91,8 +92,13 @@ import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.LedgerImportMode
+import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
+import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
+import com.android.jizhangmiao.ledger.data.PendingLedgerImport
+import com.android.jizhangmiao.ledger.data.toAmountInCents
 import com.android.jizhangmiao.ledger.data.toAmountInput
 import java.text.NumberFormat
 import java.time.Instant
@@ -140,14 +146,29 @@ fun LedgerScreen(
     onDeleteTemplateClick: (LedgerTemplate) -> Unit,
     onSaveBudgetClick: (String, String, String) -> Unit,
     onExportBackup: (Uri) -> Unit,
-    onImportBackup: (Uri) -> Unit,
+    onExportCsv: (Uri) -> Unit,
+    onPreviewBackup: (Uri) -> Unit,
+    onImportBackup: (Uri, LedgerImportMode) -> Unit,
     onScanReceipt: (Uri) -> Unit,
+    onApprovePendingImport: (PendingLedgerImport) -> Unit,
+    onIgnorePendingImport: (PendingLedgerImport) -> Unit,
+    onAddAccount: (String) -> Unit,
+    onAddCategory: (LedgerEntryType, String) -> Unit,
+    onRenameAccount: (String, String) -> Unit,
+    onRenameCategory: (LedgerEntryType, String, String) -> Unit,
+    onUnlockPin: (String) -> Unit,
+    onSetPin: (String) -> Unit,
+    onDisablePin: () -> Unit,
+    onLockNow: () -> Unit,
     onDismissStatusMessage: () -> Unit
 ) {
     var periodFilterName by rememberSaveable { mutableStateOf(LedgerPeriodFilter.THIS_MONTH.name) }
     var typeFilterName by rememberSaveable { mutableStateOf(LedgerEntryFilterType.ALL.name) }
     var accountFilter by rememberSaveable { mutableStateOf("") }
     var categoryFilter by rememberSaveable { mutableStateOf("") }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var minAmountText by rememberSaveable { mutableStateOf("") }
+    var maxAmountText by rememberSaveable { mutableStateOf("") }
     var budgetCategory by rememberSaveable { mutableStateOf(defaultCategoryFor(LedgerEntryType.EXPENSE)) }
     var trendGranularityName by rememberSaveable { mutableStateOf(LedgerTrendGranularity.MONTH.name) }
     var chartDetailCategory by rememberSaveable { mutableStateOf("") }
@@ -170,6 +191,7 @@ fun LedgerScreen(
             LedgerBoard.ENTRY,
             LedgerBoard.DASHBOARD,
             LedgerBoard.LEDGER,
+            LedgerBoard.CALENDAR,
             LedgerBoard.STATS,
             LedgerBoard.BUDGET,
             LedgerBoard.SETTINGS
@@ -179,13 +201,25 @@ fun LedgerScreen(
     val coroutineScope = rememberCoroutineScope()
     val boardTabState = rememberLazyListState()
 
-    val filteredEntries = remember(uiState.entries, periodFilter, typeFilter, accountFilter, categoryFilter) {
+    val filteredEntries = remember(
+        uiState.entries,
+        periodFilter,
+        typeFilter,
+        accountFilter,
+        categoryFilter,
+        searchQuery,
+        minAmountText,
+        maxAmountText
+    ) {
         filterEntries(
             entries = uiState.entries,
             periodFilter = periodFilter,
             typeFilter = typeFilter,
             account = accountFilter.ifBlank { null },
-            category = categoryFilter.ifBlank { null }
+            category = categoryFilter.ifBlank { null },
+            query = searchQuery,
+            minAmountInCents = minAmountText.toAmountFilterCents(),
+            maxAmountInCents = maxAmountText.toAmountFilterCents()
         )
     }
     val filteredSummary = remember(filteredEntries) {
@@ -200,7 +234,10 @@ fun LedgerScreen(
             periodFilter = LedgerPeriodFilter.THIS_MONTH,
             typeFilter = LedgerEntryFilterType.ALL,
             account = null,
-            category = null
+            category = null,
+            query = "",
+            minAmountInCents = null,
+            maxAmountInCents = null
         )
     }
     val currentMonthSummary = remember(currentMonthEntries) {
@@ -212,11 +249,11 @@ fun LedgerScreen(
     val trendPoints = remember(filteredEntries, trendGranularity) {
         buildTrendPoints(filteredEntries, trendGranularity)
     }
-    val availableCategories = remember(uiState.entries, uiState.templates) {
-        buildAvailableCategories(uiState.entries, uiState.templates)
+    val availableCategories = remember(uiState.entries, uiState.templates, uiState.profileConfig) {
+        buildAvailableCategories(uiState.entries, uiState.templates, uiState.profileConfig)
     }
-    val availableAccounts = remember(uiState.entries, uiState.templates) {
-        buildAvailableAccounts(uiState.entries, uiState.templates)
+    val availableAccounts = remember(uiState.entries, uiState.templates, uiState.profileConfig) {
+        buildAvailableAccounts(uiState.entries, uiState.templates, uiState.profileConfig)
     }
     val recentEntries = remember(uiState.entries) {
         uiState.entries.take(4)
@@ -265,10 +302,29 @@ fun LedgerScreen(
     ) { uri ->
         uri?.let(onExportBackup)
     }
+    val exportCsvLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let(onExportCsv)
+    }
+    val previewBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(onPreviewBackup)
+    }
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        uri?.let(onImportBackup)
+        uri?.let { selectedUri ->
+            onImportBackup(selectedUri, LedgerImportMode.REPLACE)
+        }
+    }
+    val mergeImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { selectedUri ->
+            onImportBackup(selectedUri, LedgerImportMode.MERGE)
+        }
     }
     val receiptLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -413,6 +469,9 @@ fun LedgerScreen(
                                     typeFilterName = LedgerEntryFilterType.ALL.name
                                     accountFilter = ""
                                     categoryFilter = ""
+                                    searchQuery = ""
+                                    minAmountText = ""
+                                    maxAmountText = ""
                                     chartDetailCategory = ""
                                     chartDetailTypeName = ""
                                     openBoard(LedgerBoard.LEDGER)
@@ -423,6 +482,8 @@ fun LedgerScreen(
                                 summary = dashboardSummary,
                                 budgetConfig = uiState.budgetConfig,
                                 currentMonthSummary = currentMonthSummary,
+                                currentMonthEntries = currentMonthEntries,
+                                allEntries = uiState.entries,
                                 topCategories = currentMonthTopCategories,
                                 accountSnapshots = accountSnapshots,
                                 totalRecordCount = uiState.entries.size,
@@ -434,11 +495,23 @@ fun LedgerScreen(
                                 }
                             )
 
+                            LedgerBoard.CALENDAR -> CalendarBoard(
+                                entries = uiState.entries,
+                                onEditClick = { entry ->
+                                    onEditClick(entry)
+                                    openBoard(LedgerBoard.ENTRY)
+                                },
+                                onDeleteClick = onDeleteClick
+                            )
+
                             LedgerBoard.STATS -> StatisticsBoard(
                                 periodFilter = periodFilter,
                                 typeFilter = typeFilter,
                                 accountFilter = accountFilter.ifBlank { null },
                                 categoryFilter = categoryFilter.ifBlank { null },
+                                searchQuery = searchQuery,
+                                minAmountText = minAmountText,
+                                maxAmountText = maxAmountText,
                                 accounts = availableAccounts,
                                 categories = availableCategories,
                                 filteredEntries = filteredEntries,
@@ -458,6 +531,20 @@ fun LedgerScreen(
                                 },
                                 onCategorySelected = { selectedCategory ->
                                     categoryFilter = selectedCategory.orEmpty()
+                                },
+                                onSearchQueryChanged = { value ->
+                                    searchQuery = value.take(40)
+                                },
+                                onMinAmountChanged = { value ->
+                                    minAmountText = value.filter { char -> char.isDigit() || char == '.' }
+                                },
+                                onMaxAmountChanged = { value ->
+                                    maxAmountText = value.filter { char -> char.isDigit() || char == '.' }
+                                },
+                                onClearAdvancedFilters = {
+                                    searchQuery = ""
+                                    minAmountText = ""
+                                    maxAmountText = ""
                                 },
                                 onTrendGranularitySelected = { selectedGranularity ->
                                     trendGranularityName = selectedGranularity.name
@@ -514,12 +601,40 @@ fun LedgerScreen(
                             )
 
                             LedgerBoard.SETTINGS -> SettingsBoard(
+                                profileConfig = uiState.profileConfig,
                                 automationTrace = uiState.automationTrace,
+                                pendingImports = uiState.pendingImports,
+                                securityConfig = uiState.securityConfig,
+                                isLocked = uiState.isLocked,
+                                accounts = availableAccounts,
+                                expenseCategories = (categorySuggestionsFor(LedgerEntryType.EXPENSE) +
+                                    uiState.profileConfig.customExpenseCategories).distinct(),
+                                incomeCategories = (categorySuggestionsFor(LedgerEntryType.INCOME) +
+                                    uiState.profileConfig.customIncomeCategories).distinct(),
+                                onApprovePendingImport = onApprovePendingImport,
+                                onIgnorePendingImport = onIgnorePendingImport,
+                                onAddAccount = onAddAccount,
+                                onAddCategory = onAddCategory,
+                                onRenameAccount = onRenameAccount,
+                                onRenameCategory = onRenameCategory,
+                                onUnlockPin = onUnlockPin,
+                                onSetPin = onSetPin,
+                                onDisablePin = onDisablePin,
+                                onLockNow = onLockNow,
                                 onExportClick = {
                                     exportLauncher.launch("jizhangmiao-backup-${LocalDate.now()}.json")
                                 },
+                                onExportCsvClick = {
+                                    exportCsvLauncher.launch("jizhangmiao-ledger-${LocalDate.now()}.csv")
+                                },
+                                onPreviewBackupClick = {
+                                    previewBackupLauncher.launch(arrayOf("application/json", "text/plain"))
+                                },
                                 onImportClick = {
                                     importLauncher.launch(arrayOf("application/json", "text/plain"))
+                                },
+                                onMergeImportClick = {
+                                    mergeImportLauncher.launch(arrayOf("application/json", "text/plain"))
                                 }
                             )
 
@@ -528,6 +643,9 @@ fun LedgerScreen(
                                 typeFilter = typeFilter,
                                 accountFilter = accountFilter.ifBlank { null },
                                 categoryFilter = categoryFilter.ifBlank { null },
+                                searchQuery = searchQuery,
+                                minAmountText = minAmountText,
+                                maxAmountText = maxAmountText,
                                 accounts = availableAccounts,
                                 categories = availableCategories,
                                 filteredEntries = filteredEntries,
@@ -543,6 +661,20 @@ fun LedgerScreen(
                                 onCategorySelected = { selectedCategory ->
                                     categoryFilter = selectedCategory.orEmpty()
                                 },
+                                onSearchQueryChanged = { value ->
+                                    searchQuery = value.take(40)
+                                },
+                                onMinAmountChanged = { value ->
+                                    minAmountText = value.filter { char -> char.isDigit() || char == '.' }
+                                },
+                                onMaxAmountChanged = { value ->
+                                    maxAmountText = value.filter { char -> char.isDigit() || char == '.' }
+                                },
+                                onClearAdvancedFilters = {
+                                    searchQuery = ""
+                                    minAmountText = ""
+                                    maxAmountText = ""
+                                },
                                 onEditClick = { entry ->
                                     onEditClick(entry)
                                     openBoard(LedgerBoard.ENTRY)
@@ -553,6 +685,12 @@ fun LedgerScreen(
                     }
                 }
             }
+        }
+
+        if (uiState.isLocked) {
+            PrivacyLockOverlay(
+                onUnlockPin = onUnlockPin
+            )
         }
     }
 }
@@ -655,6 +793,8 @@ private fun DashboardOverviewBoard(
     summary: LedgerSummary,
     budgetConfig: LedgerBudgetConfig,
     currentMonthSummary: LedgerSummary,
+    currentMonthEntries: List<LedgerEntry>,
+    allEntries: List<LedgerEntry>,
     topCategories: List<CategorySpend>,
     accountSnapshots: List<AccountSnapshot>,
     totalRecordCount: Int,
@@ -700,6 +840,236 @@ private fun DashboardOverviewBoard(
 
         item {
             AccountOverviewSection(accountSnapshots = accountSnapshots)
+        }
+
+        item {
+            BudgetAlertSection(
+                budgetConfig = budgetConfig,
+                currentMonthEntries = currentMonthEntries
+            )
+        }
+
+        item {
+            MonthlyReportSection(
+                currentMonthEntries = currentMonthEntries,
+                allEntries = allEntries
+            )
+        }
+    }
+}
+
+@Composable
+private fun MonthlyReportSection(
+    currentMonthEntries: List<LedgerEntry>,
+    allEntries: List<LedgerEntry>
+) {
+    val zoneId = ZoneId.systemDefault()
+    val currentMonth = YearMonth.now(zoneId)
+    val lastMonth = currentMonth.minusMonths(1)
+    val lastMonthEntries = remember(allEntries) {
+        allEntries.filter { entry ->
+            val month = Instant.ofEpochMilli(entry.happenedAt)
+                .atZone(zoneId)
+                .toLocalDate()
+                .let(YearMonth::from)
+            month == lastMonth
+        }
+    }
+    val currentSummary = remember(currentMonthEntries) {
+        LedgerSummaryCalculator.calculate(currentMonthEntries)
+    }
+    val lastSummary = remember(lastMonthEntries) {
+        LedgerSummaryCalculator.calculate(lastMonthEntries)
+    }
+    val topExpense = remember(currentMonthEntries) {
+        buildCategoryBreakdown(currentMonthEntries, LedgerEntryType.EXPENSE).firstOrNull()
+    }
+    val expenseDelta = currentSummary.expenseInCents - lastSummary.expenseInCents
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SectionHeading(
+                title = "\u6708\u5ea6\u62a5\u544a",
+                subtitle = "\u81ea\u52a8\u6c47\u603b\u672c\u6708\u82b1\u8d39\u91cd\u70b9\u548c\u4e0a\u6708\u5bf9\u6bd4"
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                StatTile(
+                    modifier = Modifier.weight(1f),
+                    title = "\u672c\u6708\u652f\u51fa",
+                    value = formatCurrency(currentSummary.expenseInCents),
+                    accentColor = ExpenseTint
+                )
+                StatTile(
+                    modifier = Modifier.weight(1f),
+                    title = "\u672c\u6708\u6536\u5165",
+                    value = formatCurrency(currentSummary.incomeInCents),
+                    accentColor = IncomeTint
+                )
+            }
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text(
+                    text = buildMonthlyInsightText(topExpense, expenseDelta),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BudgetAlertSection(
+    budgetConfig: LedgerBudgetConfig,
+    currentMonthEntries: List<LedgerEntry>
+) {
+    val alerts = remember(budgetConfig, currentMonthEntries) {
+        buildBudgetAlerts(budgetConfig, currentMonthEntries)
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SectionHeading(
+                title = "\u9884\u7b97\u63d0\u9192",
+                subtitle = if (alerts.isEmpty()) {
+                    "\u76ee\u524d\u6ca1\u6709\u8fbe\u5230 80% \u7684\u9884\u7b97\u98ce\u9669"
+                } else {
+                    "\u6709 ${alerts.size} \u4e2a\u9884\u7b97\u9700\u8981\u7559\u610f"
+                }
+            )
+            if (alerts.isEmpty()) {
+                Text(
+                    text = "\u7ee7\u7eed\u4fdd\u6301\uff0c\u5f53\u6708\u9884\u7b97\u6216\u5206\u7c7b\u9884\u7b97\u8d85\u8fc7 80% \u65f6\u4f1a\u5728\u8fd9\u91cc\u51fa\u73b0\u63d0\u9192\u3002",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                alerts.forEach { alert ->
+                    Surface(
+                        color = ExpenseTint.copy(alpha = 0.08f),
+                        shape = RoundedCornerShape(18.dp)
+                    ) {
+                        Text(
+                            text = alert,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CalendarBoard(
+    entries: List<LedgerEntry>,
+    onEditClick: (LedgerEntry) -> Unit,
+    onDeleteClick: (LedgerEntry) -> Unit
+) {
+    val zoneId = ZoneId.systemDefault()
+    val currentMonth = YearMonth.now(zoneId)
+    val dailySummaries = remember(entries) {
+        buildDailySummaries(entries, currentMonth)
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionHeading(
+                title = "\u8d26\u5355\u65e5\u5386",
+                subtitle = "${currentMonth.monthValue}\u6708\u6bcf\u5929\u7684\u6536\u652f\u8282\u594f\uff0c\u53ef\u4ee5\u5feb\u901f\u56de\u770b\u5f53\u5929\u660e\u7ec6"
+            )
+        }
+        if (dailySummaries.isEmpty()) {
+            item {
+                EmptyLedgerSection(
+                    title = "\u672c\u6708\u8fd8\u6ca1\u6709\u8bb0\u5f55",
+                    subtitle = "\u5f53\u6709\u8bb0\u5f55\u540e\uff0c\u65e5\u5386\u4f1a\u6309\u5929\u5c55\u793a\u6536\u5165\u3001\u652f\u51fa\u548c\u7ed3\u4f59\u3002"
+                )
+            }
+        } else {
+            dailySummaries.forEach { dailySummary ->
+                item(key = dailySummary.date.toString()) {
+                    DailySummaryCard(
+                        dailySummary = dailySummary,
+                        onEditClick = onEditClick,
+                        onDeleteClick = onDeleteClick
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DailySummaryCard(
+    dailySummary: DailySummary,
+    onEditClick: (LedgerEntry) -> Unit,
+    onDeleteClick: (LedgerEntry) -> Unit
+) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = EntryShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${dailySummary.date.monthValue}\u6708${dailySummary.date.dayOfMonth}\u65e5",
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Text(
+                    text = "\u6536 ${formatCurrency(dailySummary.incomeInCents)} / \u652f ${formatCurrency(dailySummary.expenseInCents)}",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            dailySummary.entries.take(3).forEach { entry ->
+                LedgerEntryCard(
+                    entry = entry,
+                    onEditClick = { onEditClick(entry) },
+                    onDeleteClick = { onDeleteClick(entry) }
+                )
+            }
+            if (dailySummary.entries.size > 3) {
+                Text(
+                    text = "\u8fd8\u6709 ${dailySummary.entries.size - 3} \u7b14\u8bb0\u5f55\uff0c\u53ef\u5728\u8d26\u672c\u9875\u67e5\u770b\u5168\u90e8\u3002",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
@@ -797,6 +1167,9 @@ private fun LedgerBoardPage(
     typeFilter: LedgerEntryFilterType,
     accountFilter: String?,
     categoryFilter: String?,
+    searchQuery: String,
+    minAmountText: String,
+    maxAmountText: String,
     accounts: List<String>,
     categories: List<String>,
     filteredEntries: List<LedgerEntry>,
@@ -804,6 +1177,10 @@ private fun LedgerBoardPage(
     onTypeSelected: (LedgerEntryFilterType) -> Unit,
     onAccountSelected: (String?) -> Unit,
     onCategorySelected: (String?) -> Unit,
+    onSearchQueryChanged: (String) -> Unit,
+    onMinAmountChanged: (String) -> Unit,
+    onMaxAmountChanged: (String) -> Unit,
+    onClearAdvancedFilters: () -> Unit,
     onEditClick: (LedgerEntry) -> Unit,
     onDeleteClick: (LedgerEntry) -> Unit
 ) {
@@ -818,12 +1195,19 @@ private fun LedgerBoardPage(
                 typeFilter = typeFilter,
                 accountFilter = accountFilter,
                 categoryFilter = categoryFilter,
+                searchQuery = searchQuery,
+                minAmountText = minAmountText,
+                maxAmountText = maxAmountText,
                 accounts = accounts,
                 categories = categories,
                 onPeriodSelected = onPeriodSelected,
                 onTypeSelected = onTypeSelected,
                 onAccountSelected = onAccountSelected,
-                onCategorySelected = onCategorySelected
+                onCategorySelected = onCategorySelected,
+                onSearchQueryChanged = onSearchQueryChanged,
+                onMinAmountChanged = onMinAmountChanged,
+                onMaxAmountChanged = onMaxAmountChanged,
+                onClearAdvancedFilters = onClearAdvancedFilters
             )
         }
 
@@ -863,6 +1247,9 @@ private fun StatisticsBoard(
     typeFilter: LedgerEntryFilterType,
     accountFilter: String?,
     categoryFilter: String?,
+    searchQuery: String,
+    minAmountText: String,
+    maxAmountText: String,
     accounts: List<String>,
     categories: List<String>,
     filteredEntries: List<LedgerEntry>,
@@ -875,6 +1262,10 @@ private fun StatisticsBoard(
     onTypeSelected: (LedgerEntryFilterType) -> Unit,
     onAccountSelected: (String?) -> Unit,
     onCategorySelected: (String?) -> Unit,
+    onSearchQueryChanged: (String) -> Unit,
+    onMinAmountChanged: (String) -> Unit,
+    onMaxAmountChanged: (String) -> Unit,
+    onClearAdvancedFilters: () -> Unit,
     onTrendGranularitySelected: (LedgerTrendGranularity) -> Unit,
     onChartCategorySelected: (LedgerEntryType, String) -> Unit,
     onClearChartSelection: () -> Unit,
@@ -892,12 +1283,19 @@ private fun StatisticsBoard(
                 typeFilter = typeFilter,
                 accountFilter = accountFilter,
                 categoryFilter = categoryFilter,
+                searchQuery = searchQuery,
+                minAmountText = minAmountText,
+                maxAmountText = maxAmountText,
                 accounts = accounts,
                 categories = categories,
                 onPeriodSelected = onPeriodSelected,
                 onTypeSelected = onTypeSelected,
                 onAccountSelected = onAccountSelected,
-                onCategorySelected = onCategorySelected
+                onCategorySelected = onCategorySelected,
+                onSearchQueryChanged = onSearchQueryChanged,
+                onMinAmountChanged = onMinAmountChanged,
+                onMaxAmountChanged = onMaxAmountChanged,
+                onClearAdvancedFilters = onClearAdvancedFilters
             )
         }
 
@@ -989,9 +1387,29 @@ private fun BudgetBoard(
 
 @Composable
 private fun SettingsBoard(
+    profileConfig: LedgerProfileConfig,
     automationTrace: LedgerAutomationTrace,
+    pendingImports: List<PendingLedgerImport>,
+    securityConfig: LedgerSecurityConfig,
+    isLocked: Boolean,
+    accounts: List<String>,
+    expenseCategories: List<String>,
+    incomeCategories: List<String>,
+    onApprovePendingImport: (PendingLedgerImport) -> Unit,
+    onIgnorePendingImport: (PendingLedgerImport) -> Unit,
+    onAddAccount: (String) -> Unit,
+    onAddCategory: (LedgerEntryType, String) -> Unit,
+    onRenameAccount: (String, String) -> Unit,
+    onRenameCategory: (LedgerEntryType, String, String) -> Unit,
+    onUnlockPin: (String) -> Unit,
+    onSetPin: (String) -> Unit,
+    onDisablePin: () -> Unit,
+    onLockNow: () -> Unit,
     onExportClick: () -> Unit,
-    onImportClick: () -> Unit
+    onExportCsvClick: () -> Unit,
+    onPreviewBackupClick: () -> Unit,
+    onImportClick: () -> Unit,
+    onMergeImportClick: () -> Unit
 ) {
     val context = LocalContext.current
     val automationStatus = rememberNotificationAutomationStatus()
@@ -1024,9 +1442,44 @@ private fun SettingsBoard(
         }
 
         item {
+            PendingImportReviewSection(
+                pendingImports = pendingImports,
+                onApprovePendingImport = onApprovePendingImport,
+                onIgnorePendingImport = onIgnorePendingImport
+            )
+        }
+
+        item {
+            ProfileManagementSection(
+                profileConfig = profileConfig,
+                accounts = accounts,
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                onAddAccount = onAddAccount,
+                onAddCategory = onAddCategory,
+                onRenameAccount = onRenameAccount,
+                onRenameCategory = onRenameCategory
+            )
+        }
+
+        item {
+            SecuritySection(
+                securityConfig = securityConfig,
+                isLocked = isLocked,
+                onUnlockPin = onUnlockPin,
+                onSetPin = onSetPin,
+                onDisablePin = onDisablePin,
+                onLockNow = onLockNow
+            )
+        }
+
+        item {
             ToolSection(
                 onExportClick = onExportClick,
-                onImportClick = onImportClick
+                onExportCsvClick = onExportCsvClick,
+                onPreviewBackupClick = onPreviewBackupClick,
+                onImportClick = onImportClick,
+                onMergeImportClick = onMergeImportClick
             )
         }
     }
@@ -1366,12 +1819,19 @@ private fun FilterSection(
     typeFilter: LedgerEntryFilterType,
     accountFilter: String?,
     categoryFilter: String?,
+    searchQuery: String,
+    minAmountText: String,
+    maxAmountText: String,
     accounts: List<String>,
     categories: List<String>,
     onPeriodSelected: (LedgerPeriodFilter) -> Unit,
     onTypeSelected: (LedgerEntryFilterType) -> Unit,
     onAccountSelected: (String?) -> Unit,
-    onCategorySelected: (String?) -> Unit
+    onCategorySelected: (String?) -> Unit,
+    onSearchQueryChanged: (String) -> Unit,
+    onMinAmountChanged: (String) -> Unit,
+    onMaxAmountChanged: (String) -> Unit,
+    onClearAdvancedFilters: () -> Unit
 ) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -1466,6 +1926,55 @@ private fun FilterSection(
                                 }
                             )
                         }
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionEyebrow("\u641c\u7d22\u548c\u91d1\u989d")
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChanged,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = {
+                        Text("\u641c\u7d22\u5907\u6ce8\u3001\u8d26\u6237\u3001\u5206\u7c7b\u6216\u5c0f\u7968\u6587\u672c")
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = minAmountText,
+                        onValueChange = onMinAmountChanged,
+                        modifier = Modifier.weight(1f),
+                        label = {
+                            Text("\u6700\u5c0f\u91d1\u989d")
+                        },
+                        prefix = {
+                            Text("\u00a5")
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp)
+                    )
+                    OutlinedTextField(
+                        value = maxAmountText,
+                        onValueChange = onMaxAmountChanged,
+                        modifier = Modifier.weight(1f),
+                        label = {
+                            Text("\u6700\u5927\u91d1\u989d")
+                        },
+                        prefix = {
+                            Text("\u00a5")
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp)
+                    )
+                }
+                if (searchQuery.isNotBlank() || minAmountText.isNotBlank() || maxAmountText.isNotBlank()) {
+                    TextButton(onClick = onClearAdvancedFilters) {
+                        Text("\u6e05\u7a7a\u641c\u7d22\u548c\u91d1\u989d\u6761\u4ef6")
                     }
                 }
             }
@@ -3007,7 +3516,10 @@ private fun AutomationTraceSection(trace: LedgerAutomationTrace) {
 @Composable
 private fun ToolSection(
     onExportClick: () -> Unit,
-    onImportClick: () -> Unit
+    onExportCsvClick: () -> Unit,
+    onPreviewBackupClick: () -> Unit,
+    onImportClick: () -> Unit,
+    onMergeImportClick: () -> Unit
 ) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -3021,7 +3533,7 @@ private fun ToolSection(
         ) {
             SectionHeading(
                 title = "\u5907\u4efd\u548c\u8fc1\u79fb",
-                subtitle = "\u53ef\u4ee5\u5bfc\u51fa JSON \u5907\u4efd\uff0c\u4e5f\u53ef\u4ee5\u518d\u5bfc\u5165\u5230\u540c\u4e00\u8bbe\u5907\u6216\u5176\u4ed6\u8bbe\u5907"
+                subtitle = "\u652f\u6301 JSON \u5907\u4efd\u3001CSV \u5bfc\u51fa\u3001\u5bfc\u5165\u9884\u89c8\u3001\u5408\u5e76\u6216\u8986\u76d6\u5bfc\u5165"
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3030,14 +3542,455 @@ private fun ToolSection(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(20.dp)
                 ) {
-                    Text("\u5bfc\u51fa\u5907\u4efd")
+                    Text("\u5bfc\u51fa JSON")
                 }
                 OutlinedButton(
-                    onClick = onImportClick,
+                    onClick = onExportCsvClick,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(20.dp)
                 ) {
-                    Text("\u5bfc\u5165\u5907\u4efd")
+                    Text("\u5bfc\u51fa CSV")
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = onPreviewBackupClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text("\u9884\u89c8\u5907\u4efd")
+                }
+                OutlinedButton(
+                    onClick = onMergeImportClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text("\u5408\u5e76\u5bfc\u5165")
+                }
+            }
+
+            OutlinedButton(
+                onClick = onImportClick,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text("\u8986\u76d6\u5bfc\u5165\uff08\u4f1a\u66ff\u6362\u73b0\u6709\u8d26\u672c\uff09")
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingImportReviewSection(
+    pendingImports: List<PendingLedgerImport>,
+    onApprovePendingImport: (PendingLedgerImport) -> Unit,
+    onIgnorePendingImport: (PendingLedgerImport) -> Unit
+) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u81ea\u52a8\u5bfc\u5165\u5ba1\u6838\u7bb1",
+                subtitle = if (pendingImports.isEmpty()) {
+                    "\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u8bc6\u522b\u5230\u7684\u8d26\u5355\u4f1a\u5148\u653e\u5728\u8fd9\u91cc\uff0c\u786e\u8ba4\u540e\u518d\u5165\u8d26"
+                } else {
+                    "\u6709 ${pendingImports.size} \u7b14\u5019\u9009\u8bb0\u5f55\u7b49\u5f85\u786e\u8ba4\uff0c\u53ef\u4ee5\u907f\u514d\u8bef\u5165\u8d26"
+                }
+            )
+
+            if (pendingImports.isEmpty()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Text(
+                        text = "\u5f53\u81ea\u52a8\u8bb0\u8d26\u8bc6\u522b\u5230\u4ea4\u6613\u540e\uff0c\u4e0d\u4f1a\u76f4\u63a5\u5199\u5165\u8d26\u672c\uff0c\u4f60\u53ef\u4ee5\u5728\u8fd9\u91cc\u6838\u5bf9\u91d1\u989d\u3001\u8d26\u6237\u548c\u5206\u7c7b\u3002",
+                        modifier = Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    pendingImports.take(6).forEach { pendingImport ->
+                        PendingImportCard(
+                            pendingImport = pendingImport,
+                            onApprove = { onApprovePendingImport(pendingImport) },
+                            onIgnore = { onIgnorePendingImport(pendingImport) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingImportCard(
+    pendingImport: PendingLedgerImport,
+    onApprove: () -> Unit,
+    onIgnore: () -> Unit
+) {
+    val accentColor = if (pendingImport.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
+    Surface(
+        color = accentColor.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${pendingImport.account} / ${pendingImport.category}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = formatCurrency(pendingImport.amountInCents),
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = accentColor
+                )
+            }
+            Text(
+                text = pendingImport.note.ifBlank { pendingImport.receiptText.take(60) },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = formatEntryTime(pendingImport.happenedAt),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onApprove,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u786e\u8ba4\u5165\u8d26")
+                }
+                OutlinedButton(
+                    onClick = onIgnore,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u5ffd\u7565")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileManagementSection(
+    profileConfig: LedgerProfileConfig,
+    accounts: List<String>,
+    expenseCategories: List<String>,
+    incomeCategories: List<String>,
+    onAddAccount: (String) -> Unit,
+    onAddCategory: (LedgerEntryType, String) -> Unit,
+    onRenameAccount: (String, String) -> Unit,
+    onRenameCategory: (LedgerEntryType, String, String) -> Unit
+) {
+    var accountInput by rememberSaveable { mutableStateOf("") }
+    var expenseCategoryInput by rememberSaveable { mutableStateOf("") }
+    var incomeCategoryInput by rememberSaveable { mutableStateOf("") }
+    var renameSource by rememberSaveable { mutableStateOf("") }
+    var renameTarget by rememberSaveable { mutableStateOf("") }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u5206\u7c7b\u548c\u8d26\u6237\u7ba1\u7406",
+                subtitle = "\u53ef\u4ee5\u589e\u52a0\u5e38\u7528\u8d26\u6237/\u5206\u7c7b\uff0c\u4e5f\u53ef\u4ee5\u5c06\u65e7\u540d\u79f0\u6279\u91cf\u91cd\u547d\u540d"
+            )
+
+            ProfileInputRow(
+                value = accountInput,
+                onValueChange = { accountInput = it.take(12) },
+                label = "\u65b0\u8d26\u6237",
+                buttonText = "\u6dfb\u52a0\u8d26\u6237",
+                onSubmit = {
+                    onAddAccount(accountInput)
+                    accountInput = ""
+                }
+            )
+            ProfileInputRow(
+                value = expenseCategoryInput,
+                onValueChange = { expenseCategoryInput = it.take(12) },
+                label = "\u65b0\u652f\u51fa\u5206\u7c7b",
+                buttonText = "\u6dfb\u52a0\u652f\u51fa",
+                onSubmit = {
+                    onAddCategory(LedgerEntryType.EXPENSE, expenseCategoryInput)
+                    expenseCategoryInput = ""
+                }
+            )
+            ProfileInputRow(
+                value = incomeCategoryInput,
+                onValueChange = { incomeCategoryInput = it.take(12) },
+                label = "\u65b0\u6536\u5165\u5206\u7c7b",
+                buttonText = "\u6dfb\u52a0\u6536\u5165",
+                onSubmit = {
+                    onAddCategory(LedgerEntryType.INCOME, incomeCategoryInput)
+                    incomeCategoryInput = ""
+                }
+            )
+
+            SectionEyebrow("\u5df2\u6536\u85cf")
+            Text(
+                text = "\u81ea\u5b9a\u4e49\u8d26\u6237 ${profileConfig.customAccounts.size} \u4e2a / \u652f\u51fa\u5206\u7c7b ${profileConfig.customExpenseCategories.size} \u4e2a / \u6536\u5165\u5206\u7c7b ${profileConfig.customIncomeCategories.size} \u4e2a",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(accounts.take(12)) { account ->
+                    FilterChip(
+                        selected = renameSource == account,
+                        onClick = { renameSource = account },
+                        label = { Text(account) }
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = renameSource,
+                    onValueChange = { renameSource = it.take(12) },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("\u65e7\u540d\u79f0") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp)
+                )
+                OutlinedTextField(
+                    value = renameTarget,
+                    onValueChange = { renameTarget = it.take(12) },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("\u65b0\u540d\u79f0") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp)
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        onRenameAccount(renameSource, renameTarget)
+                        renameSource = ""
+                        renameTarget = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u91cd\u547d\u540d\u8d26\u6237")
+                }
+                OutlinedButton(
+                    onClick = {
+                        onRenameCategory(LedgerEntryType.EXPENSE, renameSource, renameTarget)
+                        renameSource = ""
+                        renameTarget = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u91cd\u547d\u540d\u652f\u51fa")
+                }
+            }
+            OutlinedButton(
+                onClick = {
+                    onRenameCategory(LedgerEntryType.INCOME, renameSource, renameTarget)
+                    renameSource = ""
+                    renameTarget = ""
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Text("\u91cd\u547d\u540d\u6536\u5165\u5206\u7c7b")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileInputRow(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    buttonText: String,
+    onSubmit: () -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            label = { Text(label) },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp)
+        )
+        Button(
+            onClick = onSubmit,
+            enabled = value.isNotBlank(),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Text(buttonText)
+        }
+    }
+}
+
+@Composable
+private fun SecuritySection(
+    securityConfig: LedgerSecurityConfig,
+    isLocked: Boolean,
+    onUnlockPin: (String) -> Unit,
+    onSetPin: (String) -> Unit,
+    onDisablePin: () -> Unit,
+    onLockNow: () -> Unit
+) {
+    var pinInput by rememberSaveable { mutableStateOf("") }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u9690\u79c1\u9501",
+                subtitle = if (securityConfig.isPinEnabled) {
+                    "\u5df2\u5f00\u542f PIN \u9501\uff0c\u53ef\u4ee5\u624b\u52a8\u9501\u5b9a\u6216\u5173\u95ed"
+                } else {
+                    "\u8bbe\u7f6e 4 \u4f4d\u4ee5\u4e0a PIN\uff0c\u6253\u5f00 App \u540e\u9700\u5148\u89e3\u9501"
+                }
+            )
+            OutlinedTextField(
+                value = pinInput,
+                onValueChange = { pinInput = it.filter(Char::isDigit).take(12) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("PIN") },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                singleLine = true,
+                shape = RoundedCornerShape(18.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        onSetPin(pinInput)
+                        pinInput = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text(if (securityConfig.isPinEnabled) "\u66f4\u65b0 PIN" else "\u5f00\u542f")
+                }
+                OutlinedButton(
+                    onClick = {
+                        onUnlockPin(pinInput)
+                        pinInput = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                    enabled = securityConfig.isPinEnabled && isLocked,
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u89e3\u9501")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = onLockNow,
+                    modifier = Modifier.weight(1f),
+                    enabled = securityConfig.isPinEnabled && !isLocked,
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u7acb\u5373\u9501\u5b9a")
+                }
+                OutlinedButton(
+                    onClick = onDisablePin,
+                    modifier = Modifier.weight(1f),
+                    enabled = securityConfig.isPinEnabled,
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u5173\u95ed\u9690\u79c1\u9501")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrivacyLockOverlay(onUnlockPin: (String) -> Unit) {
+    var pinInput by rememberSaveable { mutableStateOf("") }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        Color(0xFFFFF7EE),
+                        Color(0xFFF4F7F1)
+                    )
+                )
+            )
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        ElevatedCard(shape = SectionShape) {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("\u8bb0\u8d26\u55b5\u5df2\u9501\u5b9a", style = MaterialTheme.typography.headlineLarge)
+                Text(
+                    "\u8bf7\u8f93\u5165 PIN \u67e5\u770b\u8d26\u672c",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                OutlinedTextField(
+                    value = pinInput,
+                    onValueChange = { pinInput = it.filter(Char::isDigit).take(12) },
+                    label = { Text("PIN") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp)
+                )
+                Button(
+                    onClick = {
+                        onUnlockPin(pinInput)
+                        pinInput = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("\u89e3\u9501")
                 }
             }
         }
@@ -3309,9 +4262,17 @@ private data class ChartFocus(
     val category: String
 )
 
+private data class DailySummary(
+    val date: LocalDate,
+    val entries: List<LedgerEntry>,
+    val incomeInCents: Long,
+    val expenseInCents: Long
+)
+
 enum class LedgerBoard {
     ENTRY,
     DASHBOARD,
+    CALENDAR,
     STATS,
     BUDGET,
     SETTINGS,
@@ -3327,6 +4288,7 @@ private fun LedgerBoard.displayName(): String {
     return when (this) {
         LedgerBoard.ENTRY -> "\u8bb0\u8d26"
         LedgerBoard.DASHBOARD -> "\u4eea\u8868\u76d8"
+        LedgerBoard.CALENDAR -> "\u65e5\u5386"
         LedgerBoard.STATS -> "\u5206\u6790"
         LedgerBoard.BUDGET -> "\u89c4\u5212"
         LedgerBoard.SETTINGS -> "\u8bbe\u7f6e"
@@ -3338,6 +4300,7 @@ private fun LedgerBoard.subtitle(): String {
     return when (this) {
         LedgerBoard.ENTRY -> "\u65b0\u589e\u8bb0\u5f55\u548c\u6700\u8fd1\u8d26\u5355"
         LedgerBoard.DASHBOARD -> "\u4f59\u989d\u603b\u89c8\u3001\u8d26\u6237\u770b\u677f\u548c\u6838\u5fc3\u6307\u6807"
+        LedgerBoard.CALENDAR -> "\u6309\u5929\u56de\u770b\u672c\u6708\u6536\u652f"
         LedgerBoard.STATS -> "\u6536\u652f\u56fe\u8868\u3001\u8d8b\u52bf\u548c\u5206\u7c7b\u660e\u7ec6"
         LedgerBoard.BUDGET -> "\u9884\u7b97\u3001\u5e38\u7528\u6a21\u677f\u548c\u5468\u671f\u6a21\u677f\u90fd\u5728\u8fd9\u91cc"
         LedgerBoard.SETTINGS -> "\u81ea\u52a8\u8bb0\u8d26\u3001\u5907\u4efd\u548c\u8fc1\u79fb"
@@ -3354,9 +4317,15 @@ private fun LedgerTrendGranularity.displayName(): String {
 
 private fun buildAvailableCategories(
     entries: List<LedgerEntry>,
-    templates: List<LedgerTemplate>
+    templates: List<LedgerTemplate>,
+    profileConfig: LedgerProfileConfig
 ): List<String> {
-    return (entries.map { entry -> entry.category } + templates.map { template -> template.category })
+    return (
+        entries.map { entry -> entry.category } +
+            templates.map { template -> template.category } +
+            profileConfig.customExpenseCategories +
+            profileConfig.customIncomeCategories
+        )
         .filter { category -> category.isNotBlank() }
         .distinct()
         .sorted()
@@ -3364,9 +4333,11 @@ private fun buildAvailableCategories(
 
 private fun buildAvailableAccounts(
     entries: List<LedgerEntry>,
-    templates: List<LedgerTemplate>
+    templates: List<LedgerTemplate>,
+    profileConfig: LedgerProfileConfig
 ): List<String> {
-    return (entries.map { entry -> entry.account } + templates.map { template -> template.account })
+    return (entries.map { entry -> entry.account } + templates.map { template -> template.account } +
+        profileConfig.customAccounts)
         .filter { account -> account.isNotBlank() }
         .distinct()
         .sorted()
@@ -3471,12 +4442,88 @@ private fun buildTrendPoints(
     }
 }
 
+private fun buildDailySummaries(
+    entries: List<LedgerEntry>,
+    month: YearMonth
+): List<DailySummary> {
+    val zoneId = ZoneId.systemDefault()
+    return entries
+        .filter { entry ->
+            val entryMonth = Instant.ofEpochMilli(entry.happenedAt)
+                .atZone(zoneId)
+                .toLocalDate()
+                .let(YearMonth::from)
+            entryMonth == month
+        }
+        .groupBy { entry ->
+            Instant.ofEpochMilli(entry.happenedAt)
+                .atZone(zoneId)
+                .toLocalDate()
+        }
+        .map { (date, dayEntries) ->
+            DailySummary(
+                date = date,
+                entries = dayEntries.sortedByDescending { entry -> entry.happenedAt },
+                incomeInCents = dayEntries
+                    .filter { entry -> entry.type == LedgerEntryType.INCOME }
+                    .sumOf { entry -> entry.amountInCents },
+                expenseInCents = dayEntries
+                    .filter { entry -> entry.type == LedgerEntryType.EXPENSE }
+                    .sumOf { entry -> entry.amountInCents }
+            )
+        }
+        .sortedByDescending { dailySummary -> dailySummary.date }
+}
+
+private fun buildBudgetAlerts(
+    budgetConfig: LedgerBudgetConfig,
+    currentMonthEntries: List<LedgerEntry>
+): List<String> {
+    val expenseEntries = currentMonthEntries.filter { entry -> entry.type == LedgerEntryType.EXPENSE }
+    val alerts = mutableListOf<String>()
+    val totalSpent = expenseEntries.sumOf { entry -> entry.amountInCents }
+    budgetConfig.monthlyBudgetInCents?.let { monthlyBudget ->
+        val ratio = budgetRatio(totalSpent, monthlyBudget)
+        if (ratio >= 0.8f) {
+            alerts += "\u672c\u6708\u603b\u9884\u7b97\u5df2\u4f7f\u7528 ${(ratio * 100).roundToInt()}%\uff0c\u5df2\u82b1 ${formatCurrency(totalSpent)} / ${formatCurrency(monthlyBudget)}"
+        }
+    }
+    budgetConfig.categoryBudgets.forEach { (category, budget) ->
+        val spent = expenseEntries
+            .filter { entry -> entry.category == category }
+            .sumOf { entry -> entry.amountInCents }
+        val ratio = budgetRatio(spent, budget)
+        if (ratio >= 0.8f) {
+            alerts += "$category \u9884\u7b97\u5df2\u4f7f\u7528 ${(ratio * 100).roundToInt()}%\uff0c\u5df2\u82b1 ${formatCurrency(spent)} / ${formatCurrency(budget)}"
+        }
+    }
+    return alerts
+}
+
+private fun buildMonthlyInsightText(
+    topExpense: CategorySpend?,
+    expenseDelta: Long
+): String {
+    val topText = topExpense?.let { categorySpend ->
+        "\u672c\u6708\u652f\u51fa\u6700\u9ad8\u7684\u5206\u7c7b\u662f ${categorySpend.category}\uff0c\u5171 ${formatCurrency(categorySpend.amountInCents)}\u3002"
+    } ?: "\u672c\u6708\u8fd8\u6ca1\u6709\u652f\u51fa\u8bb0\u5f55\u3002"
+    val deltaText = when {
+        expenseDelta > 0L -> "\u6bd4\u4e0a\u6708\u591a\u82b1 ${formatCurrency(expenseDelta)}\uff0c\u53ef\u4ee5\u5173\u6ce8\u6700\u5927\u652f\u51fa\u5206\u7c7b\u3002"
+        expenseDelta < 0L -> "\u6bd4\u4e0a\u6708\u5c11\u82b1 ${formatCurrency(expenseDelta.absoluteValue)}\uff0c\u8282\u594f\u6bd4\u4e0a\u6708\u66f4\u7a33\u3002"
+        else -> "\u4e0e\u4e0a\u6708\u652f\u51fa\u6301\u5e73\u3002"
+    }
+    return "$topText $deltaText"
+}
+
 private fun filterEntries(
     entries: List<LedgerEntry>,
     periodFilter: LedgerPeriodFilter,
     typeFilter: LedgerEntryFilterType,
     account: String?,
-    category: String?
+    category: String?,
+    query: String,
+    minAmountInCents: Long?,
+    maxAmountInCents: Long?
 ): List<LedgerEntry> {
     val zoneId = ZoneId.systemDefault()
     val now = Instant.now().atZone(zoneId)
@@ -3495,9 +4542,27 @@ private fun filterEntries(
         }
         val matchesAccount = account == null || entry.account == account
         val matchesCategory = category == null || entry.category == category
+        val normalizedQuery = query.trim()
+        val matchesQuery = normalizedQuery.isBlank() ||
+            entry.account.contains(normalizedQuery, ignoreCase = true) ||
+            entry.category.contains(normalizedQuery, ignoreCase = true) ||
+            entry.note.contains(normalizedQuery, ignoreCase = true) ||
+            entry.receiptText.contains(normalizedQuery, ignoreCase = true)
+        val matchesMinAmount = minAmountInCents == null || entry.amountInCents >= minAmountInCents
+        val matchesMaxAmount = maxAmountInCents == null || entry.amountInCents <= maxAmountInCents
 
-        matchesPeriod && matchesType && matchesAccount && matchesCategory
+        matchesPeriod &&
+            matchesType &&
+            matchesAccount &&
+            matchesCategory &&
+            matchesQuery &&
+            matchesMinAmount &&
+            matchesMaxAmount
     }
+}
+
+private fun String.toAmountFilterCents(): Long? {
+    return trim().takeIf { value -> value.isNotBlank() }?.toAmountInCents()
 }
 
 private fun budgetRatio(
