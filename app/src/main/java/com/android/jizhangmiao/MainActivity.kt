@@ -47,6 +47,8 @@ class MainActivity : ComponentActivity() {
                     onSuggestedAccountSelected = viewModel::onSuggestedAccountSelected,
                     onSuggestedCategorySelected = viewModel::onSuggestedCategorySelected,
                     onTemplateRecurrenceSelected = viewModel::onTemplateRecurrenceSelected,
+                    onTemplatePlanTypeSelected = viewModel::onTemplatePlanTypeSelected,
+                    onInstallmentTotalChanged = viewModel::onInstallmentTotalChanged,
                     onSaveClick = viewModel::saveEntry,
                     onCancelEditClick = viewModel::cancelEditing,
                     onDeleteClick = viewModel::deleteEntry,

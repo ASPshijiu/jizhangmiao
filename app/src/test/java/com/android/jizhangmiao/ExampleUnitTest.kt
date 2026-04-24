@@ -5,6 +5,7 @@ import com.android.jizhangmiao.ledger.parseReceiptText
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.syncRecurringTemplates
 import org.junit.Assert.assertFalse
@@ -92,6 +93,38 @@ class ExampleUnitTest {
         assertTrue(result.entries.all { entry -> entry.category == "\u4f4f\u623f" })
         assertTrue(result.templates.first().nextDueAt != null)
         assertTrue(result.templates.first().nextDueAt!! > now)
+    }
+
+    @Test
+    fun syncRecurringTemplates_advancesInstallmentProgressAndStopsWhenFinished() {
+        val monthInMillis = 31L * 24 * 60 * 60 * 1000
+        val now = 1_710_000_000_000L
+        val template = LedgerTemplate(
+            title = "Phone",
+            type = LedgerEntryType.EXPENSE,
+            amountInCents = 1_999_00L,
+            account = "bank",
+            category = "digital",
+            recurrence = LedgerTemplateRecurrence.MONTHLY,
+            nextDueAt = now - monthInMillis,
+            note = "Phone installment",
+            planType = LedgerTemplatePlanType.INSTALLMENT,
+            installmentTotalPeriods = 2,
+            installmentPaidPeriods = 0
+        )
+
+        val result = syncRecurringTemplates(
+            entries = emptyList(),
+            templates = listOf(template),
+            now = now
+        )
+
+        assertEquals(2, result.generatedCount)
+        assertEquals(2, result.entries.size)
+        assertTrue(result.entries.first().note.contains("1/2"))
+        assertTrue(result.entries.last().note.contains("2/2"))
+        assertEquals(2, result.templates.first().installmentPaidPeriods)
+        assertEquals(null, result.templates.first().nextDueAt)
     }
 
     @Test

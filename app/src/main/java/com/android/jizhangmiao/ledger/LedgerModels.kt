@@ -6,6 +6,7 @@ import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
 import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
 import com.android.jizhangmiao.ledger.data.PendingLedgerImport
@@ -120,6 +121,14 @@ fun LedgerTemplateRecurrence.displayName(): String {
     }
 }
 
+fun LedgerTemplatePlanType.displayName(): String {
+    return when (this) {
+        LedgerTemplatePlanType.STANDARD -> "\u6a21\u677f"
+        LedgerTemplatePlanType.SUBSCRIPTION -> "\u8ba2\u9605"
+        LedgerTemplatePlanType.INSTALLMENT -> "\u5206\u671f"
+    }
+}
+
 data class LedgerFormState(
     val editingEntryId: String? = null,
     val type: LedgerEntryType = LedgerEntryType.EXPENSE,
@@ -128,6 +137,8 @@ data class LedgerFormState(
     val category: String = defaultCategoryFor(LedgerEntryType.EXPENSE),
     val note: String = "",
     val templateRecurrence: LedgerTemplateRecurrence = LedgerTemplateRecurrence.NONE,
+    val templatePlanType: LedgerTemplatePlanType = LedgerTemplatePlanType.STANDARD,
+    val installmentTotalPeriods: String = "",
     val receiptText: String = "",
     val errorMessage: String? = null
 ) {

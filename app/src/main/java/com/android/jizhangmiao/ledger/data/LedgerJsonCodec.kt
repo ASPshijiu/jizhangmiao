@@ -116,6 +116,11 @@ internal object LedgerJsonCodec {
                         }
                         put("note", template.note)
                         put("createdAt", template.createdAt)
+                        put("planType", template.planType.name)
+                        template.installmentTotalPeriods?.let { totalPeriods ->
+                            put("installmentTotalPeriods", totalPeriods)
+                        }
+                        put("installmentPaidPeriods", template.installmentPaidPeriods)
                     }
                 )
             }
@@ -250,7 +255,18 @@ internal object LedgerJsonCodec {
                             item.has("nextDueAt")
                         },
                         note = item.optString("note"),
-                        createdAt = item.optLong("createdAt", System.currentTimeMillis())
+                        createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                        planType = item.optString("planType")
+                            .takeIf { value -> value.isNotBlank() }
+                            ?.let { value ->
+                                runCatching { LedgerTemplatePlanType.valueOf(value) }
+                                    .getOrDefault(LedgerTemplatePlanType.STANDARD)
+                            }
+                            ?: LedgerTemplatePlanType.STANDARD,
+                        installmentTotalPeriods = item.optInt("installmentTotalPeriods").takeIf {
+                            item.has("installmentTotalPeriods") && it > 0
+                        },
+                        installmentPaidPeriods = item.optInt("installmentPaidPeriods", 0).coerceAtLeast(0)
                     )
                 )
             }

@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         LedgerMetadataEntity::class,
         AutoImportHistoryEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(LedgerConverters::class)
@@ -35,7 +35,7 @@ internal abstract class LedgerDatabase : RoomDatabase() {
                     context.applicationContext,
                     LedgerDatabase::class.java,
                     DATABASE_NAME
-                ).addMigrations(MIGRATION_1_2)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { database ->
                     instance = database
@@ -44,9 +44,23 @@ internal abstract class LedgerDatabase : RoomDatabase() {
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
-            override fun migrate(database: SupportSQLiteDatabase) {
-                database.execSQL(
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
                     "ALTER TABLE ledger_metadata ADD COLUMN automationRulesJson TEXT NOT NULL DEFAULT '[]'"
+                )
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE ledger_templates ADD COLUMN planType TEXT NOT NULL DEFAULT 'STANDARD'"
+                )
+                db.execSQL(
+                    "ALTER TABLE ledger_templates ADD COLUMN installmentTotalPeriods INTEGER"
+                )
+                db.execSQL(
+                    "ALTER TABLE ledger_templates ADD COLUMN installmentPaidPeriods INTEGER NOT NULL DEFAULT 0"
                 )
             }
         }

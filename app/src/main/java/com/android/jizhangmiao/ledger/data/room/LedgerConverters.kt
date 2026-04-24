@@ -2,6 +2,7 @@ package com.android.jizhangmiao.ledger.data.room
 
 import androidx.room.TypeConverter
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 
 internal class LedgerConverters {
@@ -21,5 +22,14 @@ internal class LedgerConverters {
     fun toTemplateRecurrence(value: String): LedgerTemplateRecurrence {
         return runCatching { LedgerTemplateRecurrence.valueOf(value) }
             .getOrDefault(LedgerTemplateRecurrence.NONE)
+    }
+
+    @TypeConverter
+    fun fromTemplatePlanType(value: LedgerTemplatePlanType): String = value.name
+
+    @TypeConverter
+    fun toTemplatePlanType(value: String): LedgerTemplatePlanType {
+        return runCatching { LedgerTemplatePlanType.valueOf(value) }
+            .getOrDefault(LedgerTemplatePlanType.STANDARD)
     }
 }

@@ -10,6 +10,7 @@ import com.android.jizhangmiao.ledger.data.LedgerJsonCodec
 import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
 import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.PendingLedgerImport
 import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
@@ -38,7 +39,10 @@ internal data class LedgerTemplateEntity(
     val recurrence: LedgerTemplateRecurrence,
     val nextDueAt: Long?,
     val note: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val planType: LedgerTemplatePlanType,
+    val installmentTotalPeriods: Int?,
+    val installmentPaidPeriods: Int
 )
 
 @Entity(tableName = "ledger_pending_imports")
@@ -121,7 +125,10 @@ internal fun LedgerTemplateEntity.toModel(): LedgerTemplate {
         recurrence = recurrence,
         nextDueAt = nextDueAt,
         note = note,
-        createdAt = createdAt
+        createdAt = createdAt,
+        planType = planType,
+        installmentTotalPeriods = installmentTotalPeriods,
+        installmentPaidPeriods = installmentPaidPeriods
     )
 }
 
@@ -136,7 +143,10 @@ internal fun LedgerTemplate.toEntity(): LedgerTemplateEntity {
         recurrence = recurrence,
         nextDueAt = nextDueAt,
         note = note,
-        createdAt = createdAt
+        createdAt = createdAt,
+        planType = planType,
+        installmentTotalPeriods = installmentTotalPeriods,
+        installmentPaidPeriods = installmentPaidPeriods
     )
 }
 

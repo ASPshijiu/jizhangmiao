@@ -165,7 +165,8 @@ class LedgerStoreTest {
                     account = "bank",
                     category = "housing",
                     recurrence = LedgerTemplateRecurrence.MONTHLY,
-                    nextDueAt = 1_710_100_000_000L
+                    nextDueAt = 1_710_100_000_000L,
+                    planType = LedgerTemplatePlanType.SUBSCRIPTION
                 )
             )
             importedStore.updateMonthlyBudget(500_000L)
@@ -183,6 +184,12 @@ class LedgerStoreTest {
             assertTrue(existingStore.entries.value.any { entry -> entry.id == "existing-entry" })
             assertTrue(existingStore.entries.value.any { entry -> entry.id == "import-new" })
             assertEquals(2, existingStore.templates.value.size)
+            assertTrue(
+                existingStore.templates.value.any { template ->
+                    template.id == "import-template" &&
+                        template.planType == LedgerTemplatePlanType.SUBSCRIPTION
+                }
+            )
             assertEquals(500_000L, existingStore.budgetConfig.value.monthlyBudgetInCents)
             assertEquals(80_000L, existingStore.budgetConfig.value.categoryBudgets["food"])
             assertEquals(350_000L, existingStore.budgetConfig.value.categoryBudgets["housing"])

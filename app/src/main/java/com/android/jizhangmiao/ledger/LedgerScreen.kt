@@ -97,8 +97,12 @@ import com.android.jizhangmiao.ledger.data.LedgerImportMode
 import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
 import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.PendingLedgerImport
+import com.android.jizhangmiao.ledger.data.installmentRemainingPeriods
+import com.android.jizhangmiao.ledger.data.isInstallmentPlan
+import com.android.jizhangmiao.ledger.data.isSubscriptionPlan
 import com.android.jizhangmiao.ledger.data.toAmountInCents
 import com.android.jizhangmiao.ledger.data.toAmountInput
 import java.text.NumberFormat
@@ -138,6 +142,8 @@ fun LedgerScreen(
     onSuggestedAccountSelected: (String) -> Unit,
     onSuggestedCategorySelected: (String) -> Unit,
     onTemplateRecurrenceSelected: (LedgerTemplateRecurrence) -> Unit,
+    onTemplatePlanTypeSelected: (LedgerTemplatePlanType) -> Unit,
+    onInstallmentTotalChanged: (String) -> Unit,
     onSaveClick: () -> Unit,
     onCancelEditClick: () -> Unit,
     onDeleteClick: (LedgerEntry) -> Unit,
@@ -465,6 +471,8 @@ fun LedgerScreen(
                                 onSuggestedAccountSelected = onSuggestedAccountSelected,
                                 onSuggestedCategorySelected = onSuggestedCategorySelected,
                                 onTemplateRecurrenceSelected = onTemplateRecurrenceSelected,
+                                onTemplatePlanTypeSelected = onTemplatePlanTypeSelected,
+                                onInstallmentTotalChanged = onInstallmentTotalChanged,
                                 onSaveClick = onSaveClick,
                                 onCancelEditClick = onCancelEditClick,
                                 onSaveTemplateClick = onSaveTemplateClick,
@@ -733,6 +741,8 @@ private fun EntryBoard(
     onSuggestedAccountSelected: (String) -> Unit,
     onSuggestedCategorySelected: (String) -> Unit,
     onTemplateRecurrenceSelected: (LedgerTemplateRecurrence) -> Unit,
+    onTemplatePlanTypeSelected: (LedgerTemplatePlanType) -> Unit,
+    onInstallmentTotalChanged: (String) -> Unit,
     onSaveClick: () -> Unit,
     onCancelEditClick: () -> Unit,
     onSaveTemplateClick: () -> Unit,
@@ -759,6 +769,8 @@ private fun EntryBoard(
                 onSuggestedAccountSelected = onSuggestedAccountSelected,
                 onSuggestedCategorySelected = onSuggestedCategorySelected,
                 onTemplateRecurrenceSelected = onTemplateRecurrenceSelected,
+                onTemplatePlanTypeSelected = onTemplatePlanTypeSelected,
+                onInstallmentTotalChanged = onInstallmentTotalChanged,
                 onSaveClick = onSaveClick,
                 onCancelEditClick = onCancelEditClick,
                 onSaveTemplateClick = onSaveTemplateClick,
@@ -1396,6 +1408,10 @@ private fun BudgetBoard(
                 onCategoryBudgetChanged = onCategoryBudgetChanged,
                 onSaveBudgetClick = onSaveBudgetClick
             )
+        }
+
+        item {
+            PlanOverviewSection(templates = templates)
         }
 
         item {
@@ -2692,11 +2708,23 @@ private fun BudgetProgressCard(
 }
 
 @Composable
-private fun TemplateSection(
-    templates: List<LedgerTemplate>,
-    onApplyTemplateClick: (LedgerTemplate) -> Unit,
-    onDeleteTemplateClick: (LedgerTemplate) -> Unit
-) {
+private fun PlanOverviewSection(templates: List<LedgerTemplate>) {
+    val subscriptionPlans = remember(templates) {
+        templates.filter { template -> template.isSubscriptionPlan }
+    }
+    val installmentPlans = remember(templates) {
+        templates.filter { template -> template.isInstallmentPlan }
+    }
+    val nextSubscriptionDueAt = remember(subscriptionPlans) {
+        subscriptionPlans.mapNotNull { template -> template.nextDueAt }.minOrNull()
+    }
+    val nextInstallmentDueAt = remember(installmentPlans) {
+        installmentPlans.mapNotNull { template -> template.nextDueAt }.minOrNull()
+    }
+    val remainingInstallments = remember(installmentPlans) {
+        installmentPlans.sumOf { template -> template.installmentRemainingPeriods ?: 0 }
+    }
+
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = SectionShape
@@ -2708,11 +2736,115 @@ private fun TemplateSection(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             SectionHeading(
-                title = "\u5feb\u6377\u6a21\u677f",
-                subtitle = if (templates.isEmpty()) {
-                    "\u53ef\u4ee5\u5148\u4ece\u5f55\u5165\u533a\u4fdd\u5b58\u6a21\u677f\uff0c\u9009\u4e86\u6bcf\u5468/\u6bcf\u6708\u540e\u5c31\u4f1a\u53d8\u6210\u5468\u671f\u6a21\u677f"
+                title = "\u8ba2\u9605\u4e0e\u5206\u671f",
+                subtitle = if (subscriptionPlans.isEmpty() && installmentPlans.isEmpty()) {
+                    "\u53ef\u4ee5\u5728\u8bb0\u8d26\u9875\u7684\u8be6\u7ec6\u9879\u91cc\u76f4\u63a5\u5b58\u6210\u8ba2\u9605\u6216\u5206\u671f\u8ba1\u5212"
                 } else {
-                    "\u666e\u901a\u6a21\u677f\u53ef\u4ee5\u4e00\u952e\u5957\u7528\uff0c\u5468\u671f\u6a21\u677f\u4f1a\u5728\u5230\u671f\u65f6\u81ea\u52a8\u8865\u8d26"
+                    "\u8fd9\u91cc\u4f1a\u96c6\u4e2d\u770b\u5230\u81ea\u52a8\u7eed\u8d39\u548c\u5206\u671f\u8fdb\u5ea6"
+                }
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                PlanSummaryCard(
+                    modifier = Modifier.weight(1f),
+                    title = "\u8ba2\u9605",
+                    count = subscriptionPlans.size,
+                    detail = nextSubscriptionDueAt?.let { dueAt ->
+                        "\u4e0b\u6b21\u7eed\u8d39 ${formatTemplateDueTime(dueAt)}"
+                    } ?: "\u6682\u65f6\u6ca1\u6709\u8fdb\u884c\u4e2d\u7684\u8ba2\u9605",
+                    accentColor = MaterialTheme.colorScheme.primary
+                )
+                PlanSummaryCard(
+                    modifier = Modifier.weight(1f),
+                    title = "\u5206\u671f",
+                    count = installmentPlans.size,
+                    detail = if (installmentPlans.isEmpty()) {
+                        "\u6682\u65f6\u6ca1\u6709\u8fdb\u884c\u4e2d\u7684\u5206\u671f"
+                    } else {
+                        "\u5269\u4f59 $remainingInstallments \u671f" +
+                            (nextInstallmentDueAt?.let { dueAt ->
+                                "\uff0c\u4e0b\u6b21 ${formatTemplateDueTime(dueAt)}"
+                            } ?: "")
+                    },
+                    accentColor = ExpenseTint
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlanSummaryCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    count: Int,
+    detail: String,
+    accentColor: Color
+) {
+    Surface(
+        modifier = modifier,
+        color = accentColor.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = count.toString(),
+                style = MaterialTheme.typography.headlineLarge.copy(fontFamily = FontFamily.Monospace),
+                color = accentColor
+            )
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun TemplateSection(
+    templates: List<LedgerTemplate>,
+    onApplyTemplateClick: (LedgerTemplate) -> Unit,
+    onDeleteTemplateClick: (LedgerTemplate) -> Unit
+) {
+    val orderedTemplates = remember(templates) {
+        templates.sortedWith(
+            compareByDescending<LedgerTemplate> { template ->
+                template.planType != LedgerTemplatePlanType.STANDARD
+            }.thenBy { template ->
+                template.nextDueAt ?: Long.MAX_VALUE
+            }.thenByDescending { template ->
+                template.createdAt
+            }
+        )
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u6a21\u677f\u4e0e\u8ba1\u5212",
+                subtitle = if (templates.isEmpty()) {
+                    "\u53ef\u4ee5\u5148\u4ece\u5f55\u5165\u533a\u4fdd\u5b58\u6a21\u677f\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u5b58\u6210\u8ba2\u9605\u6216\u5206\u671f\u8ba1\u5212"
+                } else {
+                    "\u666e\u901a\u6a21\u677f\u53ef\u4ee5\u4e00\u952e\u5957\u7528\uff0c\u8ba2\u9605\u4f1a\u81ea\u52a8\u7eed\u8d39\uff0c\u5206\u671f\u4f1a\u81ea\u52a8\u63a8\u8fdb\u671f\u6570"
                 }
             )
 
@@ -2730,7 +2862,7 @@ private fun TemplateSection(
                 }
             } else {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(templates, key = { template -> template.id }) { template ->
+                    items(orderedTemplates, key = { template -> template.id }) { template ->
                         TemplateCard(
                             template = template,
                             onApplyClick = { onApplyTemplateClick(template) },
@@ -2750,6 +2882,11 @@ private fun TemplateCard(
     onDeleteClick: () -> Unit
 ) {
     val accentColor = if (template.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
+    val planBadgeColor = when (template.planType) {
+        LedgerTemplatePlanType.STANDARD -> MaterialTheme.colorScheme.primary
+        LedgerTemplatePlanType.SUBSCRIPTION -> MaterialTheme.colorScheme.tertiary
+        LedgerTemplatePlanType.INSTALLMENT -> accentColor
+    }
 
     Surface(
         modifier = Modifier.width(220.dp),
@@ -2778,6 +2915,19 @@ private fun TemplateCard(
                         color = accentColor
                     )
                 }
+                if (template.planType != LedgerTemplatePlanType.STANDARD) {
+                    Surface(
+                        color = planBadgeColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text(
+                            text = template.planType.displayName(),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = planBadgeColor
+                        )
+                    }
+                }
                 if (template.recurrence != LedgerTemplateRecurrence.NONE) {
                     Surface(
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
@@ -2797,9 +2947,32 @@ private fun TemplateCard(
                 style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
                 color = accentColor
             )
+            if (template.isInstallmentPlan && template.installmentTotalPeriods != null) {
+                Text(
+                    text = "\u5df2\u5b8c\u6210 ${template.installmentPaidPeriods}/${template.installmentTotalPeriods} \u671f",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (template.nextDueAt != null && template.recurrence != LedgerTemplateRecurrence.NONE) {
                 Text(
-                    text = "\u4e0b\u6b21\u81ea\u52a8\u8bb0\u8d26 ${formatTemplateDueTime(template.nextDueAt)}",
+                    text = when {
+                        template.isSubscriptionPlan -> {
+                            "\u4e0b\u6b21\u7eed\u8d39 ${formatTemplateDueTime(template.nextDueAt)}"
+                        }
+
+                        template.isInstallmentPlan -> {
+                            "\u4e0b\u6b21\u6263\u6b3e ${formatTemplateDueTime(template.nextDueAt)}"
+                        }
+
+                        else -> "\u4e0b\u6b21\u81ea\u52a8\u8bb0\u8d26 ${formatTemplateDueTime(template.nextDueAt)}"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (template.isInstallmentPlan) {
+                Text(
+                    text = "\u5206\u671f\u5df2\u5b8c\u6210",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2845,6 +3018,8 @@ private fun EntryEditorSection(
     onSuggestedAccountSelected: (String) -> Unit,
     onSuggestedCategorySelected: (String) -> Unit,
     onTemplateRecurrenceSelected: (LedgerTemplateRecurrence) -> Unit,
+    onTemplatePlanTypeSelected: (LedgerTemplatePlanType) -> Unit,
+    onInstallmentTotalChanged: (String) -> Unit,
     onSaveClick: () -> Unit,
     onCancelEditClick: () -> Unit,
     onSaveTemplateClick: () -> Unit,
@@ -2865,11 +3040,15 @@ private fun EntryEditorSection(
     val advancedByDefault = form.isEditing ||
         form.note.isNotBlank() ||
         form.templateRecurrence != LedgerTemplateRecurrence.NONE ||
+        form.templatePlanType != LedgerTemplatePlanType.STANDARD ||
+        form.installmentTotalPeriods.isNotBlank() ||
         form.receiptText.isNotBlank()
     var showAdvanced by rememberSaveable(
         form.isEditing,
         form.note,
         form.templateRecurrence,
+        form.templatePlanType,
+        form.installmentTotalPeriods,
         form.receiptText
     ) {
         mutableStateOf(advancedByDefault)
@@ -3085,18 +3264,71 @@ private fun EntryEditorSection(
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SectionEyebrow("\u6a21\u677f")
+                        SectionEyebrow("\u8ba1\u5212\u7c7b\u578b")
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(LedgerTemplateRecurrence.entries.toList()) { recurrence ->
+                            items(LedgerTemplatePlanType.entries.toList()) { planType ->
                                 FilterChip(
-                                    selected = recurrence == form.templateRecurrence,
+                                    selected = planType == form.templatePlanType,
                                     onClick = {
-                                        onTemplateRecurrenceSelected(recurrence)
+                                        onTemplatePlanTypeSelected(planType)
                                     },
                                     label = {
-                                        Text(recurrence.displayName())
+                                        Text(planType.displayName())
                                     }
                                 )
+                            }
+                        }
+                    }
+
+                    if (form.templatePlanType == LedgerTemplatePlanType.INSTALLMENT) {
+                        OutlinedTextField(
+                            value = form.installmentTotalPeriods,
+                            onValueChange = onInstallmentTotalChanged,
+                            modifier = Modifier.fillMaxWidth(),
+                            label = {
+                                Text("\u603b\u671f\u6570")
+                            },
+                            suffix = {
+                                Text("\u671f")
+                            },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            shape = RoundedCornerShape(18.dp)
+                        )
+                    }
+
+                    if (form.templatePlanType != LedgerTemplatePlanType.INSTALLMENT) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            SectionEyebrow(
+                                if (form.templatePlanType == LedgerTemplatePlanType.SUBSCRIPTION) {
+                                    "\u7eed\u8d39\u5468\u671f"
+                                } else {
+                                    "\u6a21\u677f"
+                                }
+                            )
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(
+                                    when (form.templatePlanType) {
+                                        LedgerTemplatePlanType.STANDARD -> LedgerTemplateRecurrence.entries.toList()
+                                        LedgerTemplatePlanType.SUBSCRIPTION -> {
+                                            LedgerTemplateRecurrence.entries.filterNot { recurrence ->
+                                                recurrence == LedgerTemplateRecurrence.NONE
+                                            }
+                                        }
+
+                                        LedgerTemplatePlanType.INSTALLMENT -> emptyList<LedgerTemplateRecurrence>()
+                                    }
+                                ) { recurrence ->
+                                    FilterChip(
+                                        selected = recurrence == form.templateRecurrence,
+                                        onClick = {
+                                            onTemplateRecurrenceSelected(recurrence)
+                                        },
+                                        label = {
+                                            Text(recurrence.displayName())
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -3131,10 +3363,22 @@ private fun EntryEditorSection(
                         shape = RoundedCornerShape(20.dp)
                     ) {
                         Text(
-                            text = if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
-                                "\u8be6\u7ec6\u9879\u91cc\u53ef\u4ee5\u7edf\u4e00\u8bbe\u5907\u6ce8\u3001\u5b58\u6210\u6a21\u677f\uff0c\u6216\u8005\u76f4\u63a5\u626b\u5c0f\u7968\u586b\u5145\u4fe1\u606f\u3002"
-                            } else {
-                                "\u5f53\u524d\u6a21\u677f\u4f1a\u6309${form.templateRecurrence.displayName()}\u81ea\u52a8\u8865\u8d26\u3002"
+                            text = when (form.templatePlanType) {
+                                LedgerTemplatePlanType.STANDARD -> {
+                                    if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
+                                        "\u8be6\u7ec6\u9879\u91cc\u53ef\u4ee5\u7edf\u4e00\u8bbe\u5907\u6ce8\u3001\u5b58\u6210\u6a21\u677f\uff0c\u6216\u8005\u76f4\u63a5\u626b\u5c0f\u7968\u586b\u5145\u4fe1\u606f\u3002"
+                                    } else {
+                                        "\u5f53\u524d\u6a21\u677f\u4f1a\u6309${form.templateRecurrence.displayName()}\u81ea\u52a8\u8865\u8d26\u3002"
+                                    }
+                                }
+
+                                LedgerTemplatePlanType.SUBSCRIPTION -> {
+                                    "\u8ba2\u9605\u8ba1\u5212\u4f1a\u6309${form.templateRecurrence.displayName()}\u81ea\u52a8\u8865\u8d26\uff0c\u9002\u5408\u89c6\u9891\u4f1a\u5458\u3001\u4e91\u76d8\u548c\u7f51\u8d39\u7b49\u56fa\u5b9a\u6263\u8d39\u3002"
+                                }
+
+                                LedgerTemplatePlanType.INSTALLMENT -> {
+                                    "\u5206\u671f\u8ba1\u5212\u4f1a\u6309\u6bcf\u6708\u81ea\u52a8\u8865\u8d26\uff0c\u540c\u65f6\u8bb0\u5f55\u5df2\u5b8c\u6210\u7684\u671f\u6570\u8fdb\u5ea6\u3002"
+                                }
                             },
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                             style = MaterialTheme.typography.bodyMedium,
@@ -3161,10 +3405,17 @@ private fun EntryEditorSection(
                             shape = RoundedCornerShape(20.dp)
                         ) {
                             Text(
-                                if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
-                                    "\u5b58\u4e3a\u6a21\u677f"
-                                } else {
-                                    "\u5b58\u4e3a\u5468\u671f"
+                                when (form.templatePlanType) {
+                                    LedgerTemplatePlanType.STANDARD -> {
+                                        if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
+                                            "\u5b58\u4e3a\u6a21\u677f"
+                                        } else {
+                                            "\u5b58\u4e3a\u5468\u671f"
+                                        }
+                                    }
+
+                                    LedgerTemplatePlanType.SUBSCRIPTION -> "\u5b58\u4e3a\u8ba2\u9605"
+                                    LedgerTemplatePlanType.INSTALLMENT -> "\u5b58\u4e3a\u5206\u671f"
                                 }
                             )
                         }

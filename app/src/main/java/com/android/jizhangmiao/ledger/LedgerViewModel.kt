@@ -14,6 +14,7 @@ import com.android.jizhangmiao.ledger.data.LedgerImportMode
 import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
 import com.android.jizhangmiao.ledger.data.LedgerStore
 import com.android.jizhangmiao.ledger.data.LedgerTemplate
+import com.android.jizhangmiao.ledger.data.LedgerTemplatePlanType
 import com.android.jizhangmiao.ledger.data.LedgerTemplateRecurrence
 import com.android.jizhangmiao.ledger.data.PendingLedgerImport
 import com.android.jizhangmiao.ledger.data.defaultLedgerAccount
@@ -206,7 +207,41 @@ class LedgerViewModel(
     fun onTemplateRecurrenceSelected(recurrence: LedgerTemplateRecurrence) {
         formState.update { current ->
             current.copy(
-                templateRecurrence = recurrence,
+                templateRecurrence = if (current.templatePlanType == LedgerTemplatePlanType.INSTALLMENT) {
+                    LedgerTemplateRecurrence.MONTHLY
+                } else {
+                    recurrence
+                },
+                errorMessage = null
+            )
+        }
+    }
+
+    fun onTemplatePlanTypeSelected(planType: LedgerTemplatePlanType) {
+        formState.update { current ->
+            current.copy(
+                templatePlanType = planType,
+                templateRecurrence = when (planType) {
+                    LedgerTemplatePlanType.STANDARD -> current.templateRecurrence
+                    LedgerTemplatePlanType.SUBSCRIPTION -> {
+                        if (current.templateRecurrence == LedgerTemplateRecurrence.NONE) {
+                            LedgerTemplateRecurrence.MONTHLY
+                        } else {
+                            current.templateRecurrence
+                        }
+                    }
+
+                    LedgerTemplatePlanType.INSTALLMENT -> LedgerTemplateRecurrence.MONTHLY
+                },
+                errorMessage = null
+            )
+        }
+    }
+
+    fun onInstallmentTotalChanged(value: String) {
+        formState.update { current ->
+            current.copy(
+                installmentTotalPeriods = value.filter(Char::isDigit).take(2),
                 errorMessage = null
             )
         }
@@ -302,6 +337,11 @@ class LedgerViewModel(
         val amountInCents = snapshot.amount.toAmountInCents()
         val account = snapshot.account.trim()
         val category = snapshot.category.trim()
+        val templateRecurrence = when (snapshot.templatePlanType) {
+            LedgerTemplatePlanType.INSTALLMENT -> LedgerTemplateRecurrence.MONTHLY
+            else -> snapshot.templateRecurrence
+        }
+        val installmentTotalPeriods = snapshot.installmentTotalPeriods.trim().toIntOrNull()
 
         when {
             amountInCents == null -> {
@@ -318,6 +358,18 @@ class LedgerViewModel(
                 showFormError("\u5148\u586b\u597d\u5206\u7c7b\uff0c\u518d\u4fdd\u5b58\u4e3a\u6a21\u677f")
                 return
             }
+
+            snapshot.templatePlanType == LedgerTemplatePlanType.SUBSCRIPTION &&
+                templateRecurrence == LedgerTemplateRecurrence.NONE -> {
+                showFormError("\u8ba2\u9605\u8ba1\u5212\u8bf7\u9009\u62e9\u6bcf\u5468\u6216\u6bcf\u6708")
+                return
+            }
+
+            snapshot.templatePlanType == LedgerTemplatePlanType.INSTALLMENT &&
+                (installmentTotalPeriods == null || installmentTotalPeriods < 2) -> {
+                showFormError("\u5206\u671f\u8bf7\u81f3\u5c11\u8bbe\u7f6e 2 \u671f")
+                return
+            }
         }
 
         viewModelScope.launch {
@@ -329,18 +381,37 @@ class LedgerViewModel(
                     amountInCents = amountInCents,
                     account = account,
                     category = category,
-                    recurrence = snapshot.templateRecurrence,
+                    recurrence = templateRecurrence,
                     nextDueAt = initialTemplateNextDueAt(
                         fromTimeMillis = System.currentTimeMillis(),
-                        recurrence = snapshot.templateRecurrence
+                        recurrence = templateRecurrence
                     ),
-                    note = snapshot.note.trim()
+                    note = snapshot.note.trim(),
+                    planType = snapshot.templatePlanType,
+                    installmentTotalPeriods = if (snapshot.templatePlanType == LedgerTemplatePlanType.INSTALLMENT) {
+                        installmentTotalPeriods
+                    } else {
+                        null
+                    },
+                    installmentPaidPeriods = 0
                 )
             )
-            statusMessage.value = if (snapshot.templateRecurrence == LedgerTemplateRecurrence.NONE) {
-                "\u5df2\u4fdd\u5b58\u4e3a\u5feb\u6377\u6a21\u677f"
-            } else {
-                "\u5df2\u4fdd\u5b58\u4e3a${snapshot.templateRecurrence.displayName()}\u5468\u671f\u6a21\u677f"
+            statusMessage.value = when (snapshot.templatePlanType) {
+                LedgerTemplatePlanType.STANDARD -> {
+                    if (templateRecurrence == LedgerTemplateRecurrence.NONE) {
+                        "\u5df2\u4fdd\u5b58\u4e3a\u5feb\u6377\u6a21\u677f"
+                    } else {
+                        "\u5df2\u4fdd\u5b58\u4e3a${templateRecurrence.displayName()}\u5468\u671f\u6a21\u677f"
+                    }
+                }
+
+                LedgerTemplatePlanType.SUBSCRIPTION -> {
+                    "\u5df2\u4fdd\u5b58\u4e3a${templateRecurrence.displayName()}\u8ba2\u9605\u8ba1\u5212"
+                }
+
+                LedgerTemplatePlanType.INSTALLMENT -> {
+                    "\u5df2\u4fdd\u5b58\u4e3a${installmentTotalPeriods}\u671f\u5206\u671f\u8ba1\u5212"
+                }
             }
         }
     }
@@ -352,7 +423,9 @@ class LedgerViewModel(
             account = template.account,
             category = template.category,
             note = template.note,
-            templateRecurrence = template.recurrence
+            templateRecurrence = template.recurrence,
+            templatePlanType = template.planType,
+            installmentTotalPeriods = template.installmentTotalPeriods?.toString().orEmpty()
         )
         statusMessage.value = "\u5df2\u5e94\u7528\u6a21\u677f\uff0c\u53ef\u4ee5\u76f4\u63a5\u4fdd\u5b58\u6216\u518d\u5fae\u8c03"
     }

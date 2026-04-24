@@ -17,6 +17,12 @@ enum class LedgerTemplateRecurrence {
     MONTHLY
 }
 
+enum class LedgerTemplatePlanType {
+    STANDARD,
+    SUBSCRIPTION,
+    INSTALLMENT
+}
+
 val ledgerAccountSuggestions = listOf(
     "\u652f\u4ed8\u5b9d",
     "\u5fae\u4fe1",
@@ -48,7 +54,10 @@ data class LedgerTemplate(
     val recurrence: LedgerTemplateRecurrence = LedgerTemplateRecurrence.NONE,
     val nextDueAt: Long? = null,
     val note: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val planType: LedgerTemplatePlanType = LedgerTemplatePlanType.STANDARD,
+    val installmentTotalPeriods: Int? = null,
+    val installmentPaidPeriods: Int = 0
 )
 
 data class LedgerBudgetConfig(
@@ -153,6 +162,17 @@ data class RecurringSyncResult(
     val generatedCount: Int
 )
 
+val LedgerTemplate.isInstallmentPlan: Boolean
+    get() = planType == LedgerTemplatePlanType.INSTALLMENT && installmentTotalPeriods != null
+
+val LedgerTemplate.isSubscriptionPlan: Boolean
+    get() = planType == LedgerTemplatePlanType.SUBSCRIPTION && recurrence != LedgerTemplateRecurrence.NONE
+
+val LedgerTemplate.installmentRemainingPeriods: Int?
+    get() = installmentTotalPeriods?.let { total ->
+        (total - installmentPaidPeriods.coerceAtLeast(0)).coerceAtLeast(0)
+    }
+
 fun nextRecurringDueAt(
     baseTimeMillis: Long,
     recurrence: LedgerTemplateRecurrence
@@ -178,25 +198,54 @@ fun syncRecurringTemplates(
 ): RecurringSyncResult {
     val generatedEntries = mutableListOf<LedgerEntry>()
     val updatedTemplates = templates.map { template ->
-        if (template.recurrence == LedgerTemplateRecurrence.NONE) {
-            template.copy(nextDueAt = null)
+        val normalizedTemplate = template.normalizePlan()
+
+        if (normalizedTemplate.recurrence == LedgerTemplateRecurrence.NONE) {
+            normalizedTemplate.copy(nextDueAt = null)
         } else {
-            var nextDueAt = template.nextDueAt ?: initialTemplateNextDueAt(now, template.recurrence)
+            var nextDueAt = normalizedTemplate.nextDueAt ?: initialTemplateNextDueAt(now, normalizedTemplate.recurrence)
+            var paidPeriods = normalizedTemplate.installmentPaidPeriods
+            val totalPeriods = normalizedTemplate.installmentTotalPeriods
+
+            if (normalizedTemplate.isInstallmentPlan && totalPeriods != null && paidPeriods >= totalPeriods) {
+                nextDueAt = null
+            }
+
             while (nextDueAt != null && nextDueAt <= now) {
                 generatedEntries += LedgerEntry(
-                    type = template.type,
-                    amountInCents = template.amountInCents,
-                    account = template.account.ifBlank { defaultLedgerAccount() },
-                    category = template.category,
-                    note = template.note,
+                    type = normalizedTemplate.type,
+                    amountInCents = normalizedTemplate.amountInCents,
+                    account = normalizedTemplate.account.ifBlank { defaultLedgerAccount() },
+                    category = normalizedTemplate.category,
+                    note = buildGeneratedTemplateNote(
+                        template = normalizedTemplate,
+                        installmentPeriod = if (normalizedTemplate.isInstallmentPlan) {
+                            paidPeriods + 1
+                        } else {
+                            null
+                        }
+                    ),
                     happenedAt = nextDueAt,
                     updatedAt = nextDueAt
                 )
-                nextDueAt = nextRecurringDueAt(nextDueAt, template.recurrence)
+                if (normalizedTemplate.isInstallmentPlan) {
+                    paidPeriods += 1
+                }
+                nextDueAt = if (
+                    normalizedTemplate.isInstallmentPlan &&
+                    totalPeriods != null &&
+                    paidPeriods >= totalPeriods
+                ) {
+                    null
+                } else {
+                    nextRecurringDueAt(nextDueAt, normalizedTemplate.recurrence)
+                }
             }
-            template.copy(
-                account = template.account.ifBlank { defaultLedgerAccount() },
-                nextDueAt = nextDueAt
+
+            normalizedTemplate.copy(
+                account = normalizedTemplate.account.ifBlank { defaultLedgerAccount() },
+                nextDueAt = nextDueAt,
+                installmentPaidPeriods = paidPeriods
             )
         }
     }
@@ -229,4 +278,52 @@ fun normalizePendingImports(pendingImports: List<PendingLedgerImport>): List<Pen
             .thenByDescending { it.happenedAt }
             .thenByDescending { it.id }
     )
+}
+
+private fun LedgerTemplate.normalizePlan(): LedgerTemplate {
+    val normalizedPlanType = when {
+        recurrence == LedgerTemplateRecurrence.NONE -> LedgerTemplatePlanType.STANDARD
+        planType == LedgerTemplatePlanType.INSTALLMENT && installmentTotalPeriods != null -> {
+            LedgerTemplatePlanType.INSTALLMENT
+        }
+
+        planType == LedgerTemplatePlanType.SUBSCRIPTION -> LedgerTemplatePlanType.SUBSCRIPTION
+        else -> LedgerTemplatePlanType.STANDARD
+    }
+    val normalizedRecurrence = when (normalizedPlanType) {
+        LedgerTemplatePlanType.INSTALLMENT -> LedgerTemplateRecurrence.MONTHLY
+        else -> recurrence
+    }
+    val normalizedTotalPeriods = if (normalizedPlanType == LedgerTemplatePlanType.INSTALLMENT) {
+        installmentTotalPeriods?.coerceAtLeast(1)
+    } else {
+        null
+    }
+    val normalizedPaidPeriods = if (normalizedTotalPeriods == null) {
+        0
+    } else {
+        installmentPaidPeriods.coerceIn(0, normalizedTotalPeriods)
+    }
+
+    return copy(
+        recurrence = normalizedRecurrence,
+        nextDueAt = if (normalizedRecurrence == LedgerTemplateRecurrence.NONE) null else nextDueAt,
+        planType = normalizedPlanType,
+        installmentTotalPeriods = normalizedTotalPeriods,
+        installmentPaidPeriods = normalizedPaidPeriods
+    )
+}
+
+private fun buildGeneratedTemplateNote(
+    template: LedgerTemplate,
+    installmentPeriod: Int?
+): String {
+    if (!template.isInstallmentPlan || installmentPeriod == null || template.installmentTotalPeriods == null) {
+        return template.note
+    }
+
+    val baseNote = template.note.trim().ifBlank {
+        template.title.trim().ifBlank { template.category }
+    }
+    return "$baseNote \u7b2c${installmentPeriod}/${template.installmentTotalPeriods}\u671f"
 }
