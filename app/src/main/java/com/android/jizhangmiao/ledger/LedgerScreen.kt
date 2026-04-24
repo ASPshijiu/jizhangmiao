@@ -149,6 +149,7 @@ fun LedgerScreen(
     onExportCsv: (Uri) -> Unit,
     onPreviewBackup: (Uri) -> Unit,
     onImportBackup: (Uri, LedgerImportMode) -> Unit,
+    onImportStatement: (Uri) -> Unit,
     onScanReceipt: (Uri) -> Unit,
     onApprovePendingImport: (PendingLedgerImport) -> Unit,
     onIgnorePendingImport: (PendingLedgerImport) -> Unit,
@@ -325,6 +326,11 @@ fun LedgerScreen(
         uri?.let { selectedUri ->
             onImportBackup(selectedUri, LedgerImportMode.MERGE)
         }
+    }
+    val statementImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(onImportStatement)
     }
     val receiptLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -629,6 +635,17 @@ fun LedgerScreen(
                                 },
                                 onPreviewBackupClick = {
                                     previewBackupLauncher.launch(arrayOf("application/json", "text/plain"))
+                                },
+                                onImportStatementClick = {
+                                    statementImportLauncher.launch(
+                                        arrayOf(
+                                            "text/csv",
+                                            "text/comma-separated-values",
+                                            "application/csv",
+                                            "application/vnd.ms-excel",
+                                            "text/plain"
+                                        )
+                                    )
                                 },
                                 onImportClick = {
                                     importLauncher.launch(arrayOf("application/json", "text/plain"))
@@ -1408,6 +1425,7 @@ private fun SettingsBoard(
     onExportClick: () -> Unit,
     onExportCsvClick: () -> Unit,
     onPreviewBackupClick: () -> Unit,
+    onImportStatementClick: () -> Unit,
     onImportClick: () -> Unit,
     onMergeImportClick: () -> Unit
 ) {
@@ -1478,6 +1496,7 @@ private fun SettingsBoard(
                 onExportClick = onExportClick,
                 onExportCsvClick = onExportCsvClick,
                 onPreviewBackupClick = onPreviewBackupClick,
+                onImportStatementClick = onImportStatementClick,
                 onImportClick = onImportClick,
                 onMergeImportClick = onMergeImportClick
             )
@@ -3518,6 +3537,7 @@ private fun ToolSection(
     onExportClick: () -> Unit,
     onExportCsvClick: () -> Unit,
     onPreviewBackupClick: () -> Unit,
+    onImportStatementClick: () -> Unit,
     onImportClick: () -> Unit,
     onMergeImportClick: () -> Unit
 ) {
@@ -3533,7 +3553,7 @@ private fun ToolSection(
         ) {
             SectionHeading(
                 title = "\u5907\u4efd\u548c\u8fc1\u79fb",
-                subtitle = "\u652f\u6301 JSON \u5907\u4efd\u3001CSV \u5bfc\u51fa\u3001\u5bfc\u5165\u9884\u89c8\u3001\u5408\u5e76\u6216\u8986\u76d6\u5bfc\u5165"
+                subtitle = "\u652f\u6301 JSON \u5907\u4efd\u3001CSV \u5bfc\u51fa\u3001\u8d26\u5355 CSV \u5bfc\u5165\u3001\u5bfc\u5165\u9884\u89c8\u3001\u5408\u5e76\u6216\u8986\u76d6\u5bfc\u5165"
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3568,6 +3588,14 @@ private fun ToolSection(
                 ) {
                     Text("\u5408\u5e76\u5bfc\u5165")
                 }
+            }
+
+            OutlinedButton(
+                onClick = onImportStatementClick,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text("\u5bfc\u5165\u8d26\u5355 CSV\uff08\u5408\u5e76\u8fdb\u73b0\u6709\u8d26\u672c\uff09")
             }
 
             OutlinedButton(

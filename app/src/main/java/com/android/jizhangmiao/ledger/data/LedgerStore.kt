@@ -595,6 +595,69 @@ class LedgerStore internal constructor(
         }
     }
 
+    suspend fun importStatementEntries(
+        entries: List<LedgerEntry>
+    ): LedgerStatementImportResult {
+        val normalizedImportedEntries = normalizeEntries(
+            entries.map { entry ->
+                entry.copy(
+                    id = entry.id.ifBlank { UUID.randomUUID().toString() },
+                    account = entry.account.ifBlank { defaultLedgerAccount() },
+                    category = entry.category.ifBlank { "其他" }
+                )
+            }
+        )
+        if (normalizedImportedEntries.isEmpty()) {
+            return LedgerStatementImportResult(
+                totalCount = 0,
+                importedCount = 0,
+                skippedCount = 0
+            )
+        }
+
+        return withContext(Dispatchers.IO) {
+            withWriteTransaction {
+                val existingEntries = dao.getEntries().map { entity -> entity.toModel() }
+                val metadata = metadataOrDefault()
+                val profileConfig = metadata.toProfileConfig()
+                val mergedEntries = mergeEntries(existingEntries, normalizedImportedEntries)
+                val importedCount = (mergedEntries.size - existingEntries.size).coerceAtLeast(0)
+                val updatedProfileConfig = profileConfig.copy(
+                    customAccounts = (profileConfig.customAccounts +
+                        normalizedImportedEntries.map { entry -> entry.account })
+                        .filter { account -> account.isNotBlank() }
+                        .distinct()
+                        .sorted(),
+                    customExpenseCategories = (profileConfig.customExpenseCategories +
+                        normalizedImportedEntries.filter { entry -> entry.type == LedgerEntryType.EXPENSE }
+                            .map { entry -> entry.category })
+                        .filter { category -> category.isNotBlank() }
+                        .distinct()
+                        .sorted(),
+                    customIncomeCategories = (profileConfig.customIncomeCategories +
+                        normalizedImportedEntries.filter { entry -> entry.type == LedgerEntryType.INCOME }
+                            .map { entry -> entry.category })
+                        .filter { category -> category.isNotBlank() }
+                        .distinct()
+                        .sorted()
+                )
+
+                if (mergedEntries != existingEntries) {
+                    replaceEntries(mergedEntries)
+                }
+                if (updatedProfileConfig != profileConfig) {
+                    dao.upsertMetadata(metadata.withProfileConfig(updatedProfileConfig))
+                }
+
+                LedgerStatementImportResult(
+                    totalCount = normalizedImportedEntries.size,
+                    importedCount = importedCount,
+                    skippedCount = normalizedImportedEntries.size - importedCount
+                )
+            }
+        }
+    }
+
     private suspend fun initializeStore(): Snapshot {
         if (legacyPreferences != null) {
             migrateLegacyPreferencesIfNeeded(legacyPreferences)

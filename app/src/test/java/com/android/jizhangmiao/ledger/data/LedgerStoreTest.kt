@@ -162,6 +162,53 @@ class LedgerStoreTest {
     }
 
     @Test
+    fun importStatementEntries_mergesEntriesAndSkipsDuplicates() = withStore { store ->
+        store.addEntry(
+            LedgerEntry(
+                id = "existing-entry",
+                type = LedgerEntryType.EXPENSE,
+                amountInCents = 1_500L,
+                account = "微信",
+                category = "餐饮",
+                note = "早餐",
+                happenedAt = 1_710_000_000_000L,
+                updatedAt = 1_710_000_000_000L
+            )
+        )
+
+        val result = store.importStatementEntries(
+            listOf(
+                LedgerEntry(
+                    type = LedgerEntryType.EXPENSE,
+                    amountInCents = 1_500L,
+                    account = "微信",
+                    category = "餐饮",
+                    note = "早餐",
+                    happenedAt = 1_710_000_000_000L,
+                    updatedAt = 1_710_000_000_000L
+                ),
+                LedgerEntry(
+                    type = LedgerEntryType.INCOME,
+                    amountInCents = 8_800L,
+                    account = "支付宝",
+                    category = "退款",
+                    note = "售后退款",
+                    happenedAt = 1_710_000_800_000L,
+                    updatedAt = 1_710_000_800_000L
+                )
+            )
+        )
+
+        assertEquals(2, result.totalCount)
+        assertEquals(1, result.importedCount)
+        assertEquals(1, result.skippedCount)
+        assertEquals(2, store.entries.value.size)
+        assertTrue(store.entries.value.any { entry -> entry.category == "退款" })
+        assertTrue(store.profileConfig.value.customAccounts.contains("支付宝"))
+        assertTrue(store.profileConfig.value.customIncomeCategories.contains("退款"))
+    }
+
+    @Test
     fun init_migratesLegacyPreferencesIntoRoom() = withStore(
         legacyPreferences = FakeSharedPreferences().apply {
             edit()

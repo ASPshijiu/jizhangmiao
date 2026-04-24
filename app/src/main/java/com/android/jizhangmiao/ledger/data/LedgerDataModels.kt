@@ -100,6 +100,12 @@ data class BackupPreview(
     val categoryBudgetCount: Int
 )
 
+data class LedgerStatementImportResult(
+    val totalCount: Int,
+    val importedCount: Int,
+    val skippedCount: Int
+)
+
 enum class LedgerImportMode {
     REPLACE,
     MERGE

@@ -20,6 +20,7 @@ import com.android.jizhangmiao.ledger.data.initialTemplateNextDueAt
 import com.android.jizhangmiao.ledger.data.sanitizeAmountInput
 import com.android.jizhangmiao.ledger.data.toAmountInCents
 import com.android.jizhangmiao.ledger.data.toAmountInput
+import java.nio.charset.Charset
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -509,6 +510,45 @@ class LedgerViewModel(
         }
     }
 
+    fun importStatement(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                val statementText = readTextFromUri(uri)
+                val parsedResult = parseStatementCsv(statementText)
+                    ?: error("Unsupported statement csv")
+                val importedResult = ledgerStore.importStatementEntries(parsedResult.entries)
+                parsedResult to importedResult
+            }.onSuccess { (parsedResult, importedResult) ->
+                val skippedCount = importedResult.skippedCount + parsedResult.skippedRowCount
+                statusMessage.value = if (importedResult.importedCount > 0) {
+                    buildString {
+                        append(parsedResult.sourceLabel)
+                        append("导入完成：新增 ")
+                        append(importedResult.importedCount)
+                        append(" 笔")
+                        if (skippedCount > 0) {
+                            append("，跳过 ")
+                            append(skippedCount)
+                            append(" 行")
+                        }
+                    }
+                } else {
+                    buildString {
+                        append(parsedResult.sourceLabel)
+                        append("里没有新增记录")
+                        if (skippedCount > 0) {
+                            append("，已跳过 ")
+                            append(skippedCount)
+                            append(" 行重复或无效数据")
+                        }
+                    }
+                }
+            }.onFailure {
+                statusMessage.value = "账单导入失败，当前仅支持带时间和金额列的 CSV 文件"
+            }
+        }
+    }
+
     fun unlockWithPin(pin: String) {
         val securityConfig = ledgerStore.securityConfig.value
         if (!securityConfig.isPinEnabled) {
@@ -611,6 +651,32 @@ class LedgerViewModel(
         val bytes = ByteArray(16)
         SecureRandom().nextBytes(bytes)
         return Base64.getEncoder().encodeToString(bytes)
+    }
+
+    private fun readTextFromUri(uri: Uri): String {
+        val bytes = appContext.contentResolver.openInputStream(uri)?.use { input ->
+            input.readBytes()
+        } ?: error("Unable to open input stream")
+
+        val candidateCharsets = listOf(
+            Charsets.UTF_8,
+            Charset.forName("GB18030"),
+            Charsets.UTF_16LE,
+            Charsets.UTF_16BE
+        )
+        return candidateCharsets
+            .map { charset -> charset to bytes.toString(charset) }
+            .maxByOrNull { (_, text) ->
+                scoreDecodedText(text)
+            }
+            ?.second
+            ?.replace("\uFEFF", "")
+            ?: error("Unable to decode statement file")
+    }
+
+    private fun scoreDecodedText(text: String): Int {
+        return text.count { char -> char == '\n' || char == ',' || char == ';' || char == '\t' } * 2 -
+            text.count { char -> char == '\uFFFD' } * 5
     }
 
     private fun hashPin(

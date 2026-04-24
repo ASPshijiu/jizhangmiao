@@ -59,6 +59,7 @@ class MainActivity : ComponentActivity() {
                     onExportCsv = viewModel::exportCsv,
                     onPreviewBackup = viewModel::previewBackup,
                     onImportBackup = viewModel::importBackup,
+                    onImportStatement = viewModel::importStatement,
                     onScanReceipt = viewModel::scanReceipt,
                     onApprovePendingImport = viewModel::approvePendingImport,
                     onIgnorePendingImport = viewModel::ignorePendingImport,
