@@ -64,6 +64,7 @@ internal data class LedgerMetadataEntity(
     val customAccountsJson: String = "[]",
     val customExpenseCategoriesJson: String = "[]",
     val customIncomeCategoriesJson: String = "[]",
+    val automationRulesJson: String = "[]",
     val automationSourceLabel: String = "",
     val automationSummary: String = "",
     val automationRawText: String = "",
@@ -186,6 +187,8 @@ internal fun LedgerMetadataEntity.toProfileConfig(): LedgerProfileConfig {
     )
 }
 
+internal fun LedgerMetadataEntity.toAutomationRules() = LedgerJsonCodec.decodeAutomationRules(automationRulesJson)
+
 internal fun LedgerMetadataEntity.toAutomationTrace(): LedgerAutomationTrace {
     return LedgerAutomationTrace(
         sourceLabel = automationSourceLabel,
@@ -214,6 +217,12 @@ internal fun LedgerMetadataEntity.withProfileConfig(config: LedgerProfileConfig)
         customAccountsJson = LedgerJsonCodec.encodeStringList(config.customAccounts),
         customExpenseCategoriesJson = LedgerJsonCodec.encodeStringList(config.customExpenseCategories),
         customIncomeCategoriesJson = LedgerJsonCodec.encodeStringList(config.customIncomeCategories)
+    )
+}
+
+internal fun LedgerMetadataEntity.withAutomationRules(rules: List<com.android.jizhangmiao.ledger.data.LedgerAutomationRule>): LedgerMetadataEntity {
+    return copy(
+        automationRulesJson = LedgerJsonCodec.encodeAutomationRules(rules).toString()
     )
 }
 

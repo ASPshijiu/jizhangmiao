@@ -8,7 +8,8 @@ internal data class LedgerBackupPayload(
     val entries: List<LedgerEntry>,
     val templates: List<LedgerTemplate>,
     val budgetConfig: LedgerBudgetConfig,
-    val profileConfig: LedgerProfileConfig
+    val profileConfig: LedgerProfileConfig,
+    val automationRules: List<LedgerAutomationRule>
 )
 
 internal object LedgerJsonCodec {
@@ -16,7 +17,8 @@ internal object LedgerJsonCodec {
         entries: List<LedgerEntry>,
         templates: List<LedgerTemplate>,
         budgetConfig: LedgerBudgetConfig,
-        profileConfig: LedgerProfileConfig
+        profileConfig: LedgerProfileConfig,
+        automationRules: List<LedgerAutomationRule>
     ): String {
         return JSONObject().apply {
             put("version", 3)
@@ -25,6 +27,7 @@ internal object LedgerJsonCodec {
             put("templates", encodeTemplates(templates))
             put("budgetConfig", encodeBudgetConfig(budgetConfig))
             put("profileConfig", encodeProfileConfig(profileConfig))
+            put("automationRules", encodeAutomationRules(automationRules))
         }.toString(2)
     }
 
@@ -50,7 +53,8 @@ internal object LedgerJsonCodec {
                 entries = decodeEntries(backup.optJSONArray("entries")),
                 templates = decodeTemplates(backup.optJSONArray("templates")),
                 budgetConfig = decodeBudgetConfig(backup.optJSONObject("budgetConfig")),
-                profileConfig = decodeProfileConfig(backup.optJSONObject("profileConfig"))
+                profileConfig = decodeProfileConfig(backup.optJSONObject("profileConfig")),
+                automationRules = decodeAutomationRules(backup.optJSONArray("automationRules"))
             )
         }.getOrNull()
     }
@@ -177,6 +181,23 @@ internal object LedgerJsonCodec {
         return JSONObject().apply {
             put("pinHash", config.pinHash)
             put("pinSalt", config.pinSalt)
+        }
+    }
+
+    fun encodeAutomationRules(rules: List<LedgerAutomationRule>): JSONArray {
+        return JSONArray().apply {
+            rules.forEach { rule ->
+                put(
+                    JSONObject().apply {
+                        put("id", rule.id)
+                        put("keyword", rule.keyword)
+                        put("type", rule.type.name)
+                        put("category", rule.category)
+                        put("account", rule.account)
+                        put("createdAt", rule.createdAt)
+                    }
+                )
+            }
         }
     }
 
@@ -318,6 +339,45 @@ internal object LedgerJsonCodec {
         return LedgerSecurityConfig(
             pinHash = jsonObject.optString("pinHash"),
             pinSalt = jsonObject.optString("pinSalt")
+        )
+    }
+
+    fun decodeAutomationRules(value: String): List<LedgerAutomationRule> {
+        return runCatching {
+            decodeAutomationRules(JSONArray(value))
+        }.getOrDefault(emptyList())
+    }
+
+    fun decodeAutomationRules(jsonArray: JSONArray?): List<LedgerAutomationRule> {
+        if (jsonArray == null) {
+            return emptyList()
+        }
+
+        return buildList {
+            for (index in 0 until jsonArray.length()) {
+                val item = jsonArray.getJSONObject(index)
+                val keyword = item.optString("keyword").trim()
+                val category = item.optString("category").trim()
+                if (keyword.isBlank() || category.isBlank()) {
+                    continue
+                }
+                add(
+                    LedgerAutomationRule(
+                        id = item.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                        keyword = keyword,
+                        type = item.optString("type")
+                            .takeIf { value -> value.isNotBlank() }
+                            ?.let(LedgerEntryType::valueOf)
+                            ?: LedgerEntryType.EXPENSE,
+                        category = category,
+                        account = item.optString("account").trim(),
+                        createdAt = item.optLong("createdAt", System.currentTimeMillis())
+                    )
+                )
+            }
+        }.sortedWith(
+            compareByDescending<LedgerAutomationRule> { rule -> rule.keyword.trim().length }
+                .thenByDescending { rule -> rule.createdAt }
         )
     }
 

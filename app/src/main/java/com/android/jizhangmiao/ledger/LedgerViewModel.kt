@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.android.jizhangmiao.ledger.data.LedgerAutomationRule
 import com.android.jizhangmiao.ledger.data.LedgerEntry
 import com.android.jizhangmiao.ledger.data.LedgerEntryType
 import com.android.jizhangmiao.ledger.data.LedgerImportMode
@@ -41,12 +42,14 @@ class LedgerViewModel(
         val templates: List<LedgerTemplate>,
         val budgetConfig: com.android.jizhangmiao.ledger.data.LedgerBudgetConfig,
         val profileConfig: com.android.jizhangmiao.ledger.data.LedgerProfileConfig,
+        val automationRules: List<LedgerAutomationRule>,
         val automationTrace: com.android.jizhangmiao.ledger.data.LedgerAutomationTrace,
         val pendingImports: List<PendingLedgerImport>,
         val securityConfig: LedgerSecurityConfig
     )
 
     private data class UiMeta(
+        val automationRules: List<LedgerAutomationRule>,
         val automationTrace: com.android.jizhangmiao.ledger.data.LedgerAutomationTrace,
         val pendingImports: List<PendingLedgerImport>,
         val securityConfig: LedgerSecurityConfig
@@ -78,17 +81,20 @@ class LedgerViewModel(
                 templates = templates,
                 budgetConfig = budgetConfig,
                 profileConfig = profileConfig,
+                automationRules = ledgerStore.automationRules.value,
                 automationTrace = ledgerStore.automationTrace.value,
                 pendingImports = ledgerStore.pendingImports.value,
                 securityConfig = ledgerStore.securityConfig.value
             )
         },
         combine(
+            ledgerStore.automationRules,
             ledgerStore.automationTrace,
             ledgerStore.pendingImports,
             ledgerStore.securityConfig
-        ) { automationTrace, pendingImports, securityConfig ->
+        ) { automationRules, automationTrace, pendingImports, securityConfig ->
             UiMeta(
+                automationRules = automationRules,
                 automationTrace = automationTrace,
                 pendingImports = pendingImports,
                 securityConfig = securityConfig
@@ -96,6 +102,7 @@ class LedgerViewModel(
         }
     ) { seed, meta ->
         seed.copy(
+            automationRules = meta.automationRules,
             automationTrace = meta.automationTrace,
             pendingImports = meta.pendingImports,
             securityConfig = meta.securityConfig
@@ -113,6 +120,7 @@ class LedgerViewModel(
                 templates = seed.templates,
                 budgetConfig = seed.budgetConfig,
                 profileConfig = seed.profileConfig,
+                automationRules = seed.automationRules,
                 automationTrace = seed.automationTrace,
                 pendingImports = seed.pendingImports,
                 securityConfig = seed.securityConfig,
@@ -384,6 +392,52 @@ class LedgerViewModel(
         viewModelScope.launch {
             ledgerStore.addCategory(type, category)
             statusMessage.value = "\u5206\u7c7b\u5df2\u52a0\u5165\u5e38\u7528\u5217\u8868"
+        }
+    }
+
+    fun addAutomationRule(
+        keyword: String,
+        type: LedgerEntryType,
+        category: String,
+        account: String
+    ) {
+        val normalizedKeyword = keyword.trim().take(20)
+        val normalizedCategory = category.trim().take(12)
+        val normalizedAccount = account.trim().take(12)
+
+        when {
+            normalizedKeyword.isBlank() -> {
+                statusMessage.value = "\u8bf7\u8f93\u5165\u5339\u914d\u5173\u952e\u8bcd"
+                return
+            }
+
+            normalizedCategory.isBlank() -> {
+                statusMessage.value = "\u8bf7\u8f93\u5165\u8981\u81ea\u52a8\u5f52\u7c7b\u7684\u5206\u7c7b"
+                return
+            }
+        }
+
+        viewModelScope.launch {
+            ledgerStore.addAutomationRule(
+                LedgerAutomationRule(
+                    keyword = normalizedKeyword,
+                    type = type,
+                    category = normalizedCategory,
+                    account = normalizedAccount
+                )
+            )
+            ledgerStore.addCategory(type, normalizedCategory)
+            if (normalizedAccount.isNotBlank()) {
+                ledgerStore.addAccount(normalizedAccount)
+            }
+            statusMessage.value = "\u81ea\u52a8\u5206\u7c7b\u89c4\u5219\u5df2\u4fdd\u5b58"
+        }
+    }
+
+    fun deleteAutomationRule(rule: LedgerAutomationRule) {
+        viewModelScope.launch {
+            ledgerStore.deleteAutomationRule(rule.id)
+            statusMessage.value = "\u81ea\u52a8\u5206\u7c7b\u89c4\u5219\u5df2\u5220\u9664"
         }
     }
 

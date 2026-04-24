@@ -9,12 +9,14 @@ import com.android.jizhangmiao.ledger.data.room.DefaultLedgerMetadataEntity
 import com.android.jizhangmiao.ledger.data.room.LedgerDatabase
 import com.android.jizhangmiao.ledger.data.room.LedgerMetadataEntity
 import com.android.jizhangmiao.ledger.data.room.toAutomationTrace
+import com.android.jizhangmiao.ledger.data.room.toAutomationRules
 import com.android.jizhangmiao.ledger.data.room.toBudgetConfig
 import com.android.jizhangmiao.ledger.data.room.toEntity
 import com.android.jizhangmiao.ledger.data.room.toModel
 import com.android.jizhangmiao.ledger.data.room.toProfileConfig
 import com.android.jizhangmiao.ledger.data.room.toSecurityConfig
 import com.android.jizhangmiao.ledger.data.room.withAutomationTrace
+import com.android.jizhangmiao.ledger.data.room.withAutomationRules
 import com.android.jizhangmiao.ledger.data.room.withBudgetConfig
 import com.android.jizhangmiao.ledger.data.room.withProfileConfig
 import com.android.jizhangmiao.ledger.data.room.withSecurityConfig
@@ -39,6 +41,7 @@ class LedgerStore internal constructor(
         val templates: List<LedgerTemplate>,
         val budgetConfig: LedgerBudgetConfig,
         val profileConfig: LedgerProfileConfig,
+        val automationRules: List<LedgerAutomationRule>,
         val automationTrace: LedgerAutomationTrace,
         val pendingImports: List<PendingLedgerImport>,
         val securityConfig: LedgerSecurityConfig
@@ -54,6 +57,7 @@ class LedgerStore internal constructor(
     private val _templates = MutableStateFlow(initialSnapshot.templates)
     private val _budgetConfig = MutableStateFlow(initialSnapshot.budgetConfig)
     private val _profileConfig = MutableStateFlow(initialSnapshot.profileConfig)
+    private val _automationRules = MutableStateFlow(initialSnapshot.automationRules)
     private val _automationTrace = MutableStateFlow(initialSnapshot.automationTrace)
     private val _pendingImports = MutableStateFlow(initialSnapshot.pendingImports)
     private val _securityConfig = MutableStateFlow(initialSnapshot.securityConfig)
@@ -62,6 +66,7 @@ class LedgerStore internal constructor(
     val templates: StateFlow<List<LedgerTemplate>> = _templates.asStateFlow()
     val budgetConfig: StateFlow<LedgerBudgetConfig> = _budgetConfig.asStateFlow()
     val profileConfig: StateFlow<LedgerProfileConfig> = _profileConfig.asStateFlow()
+    val automationRules: StateFlow<List<LedgerAutomationRule>> = _automationRules.asStateFlow()
     val automationTrace: StateFlow<LedgerAutomationTrace> = _automationTrace.asStateFlow()
     val pendingImports: StateFlow<List<PendingLedgerImport>> = _pendingImports.asStateFlow()
     val securityConfig: StateFlow<LedgerSecurityConfig> = _securityConfig.asStateFlow()
@@ -87,6 +92,7 @@ class LedgerStore internal constructor(
                 val resolved = metadata ?: DefaultLedgerMetadataEntity
                 _budgetConfig.value = resolved.toBudgetConfig()
                 _profileConfig.value = resolved.toProfileConfig()
+                _automationRules.value = resolved.toAutomationRules()
                 _automationTrace.value = resolved.toAutomationTrace()
                 _securityConfig.value = resolved.toSecurityConfig()
             }
@@ -131,6 +137,8 @@ class LedgerStore internal constructor(
     internal suspend fun importAutoEntry(entry: AutoImportedEntry): Boolean {
         return withContext(Dispatchers.IO) {
             withWriteTransaction {
+                val rules = metadataOrDefault().toAutomationRules()
+                val resolvedEntry = entry.applyAutomationRules(rules)
                 val history = dao.getAutoImportHistory()
                 val pendingImports = dao.getPendingImports().map { entity -> entity.toModel() }
                 if (
@@ -144,10 +152,10 @@ class LedgerStore internal constructor(
                     .asSequence()
                     .map { entity -> entity.toModel() }
                     .any { savedEntry ->
-                        savedEntry.type == entry.type &&
-                            savedEntry.amountInCents == entry.amountInCents &&
-                            savedEntry.account == entry.account &&
-                            savedEntry.happenedAt in (entry.happenedAt - AUTO_IMPORT_WINDOW_MILLIS)..(entry.happenedAt + AUTO_IMPORT_WINDOW_MILLIS)
+                        savedEntry.type == resolvedEntry.type &&
+                            savedEntry.amountInCents == resolvedEntry.amountInCents &&
+                            savedEntry.account == resolvedEntry.account &&
+                            savedEntry.happenedAt in (resolvedEntry.happenedAt - AUTO_IMPORT_WINDOW_MILLIS)..(resolvedEntry.happenedAt + AUTO_IMPORT_WINDOW_MILLIS)
                     }
 
                 dao.upsertAutoImportHistory(
@@ -170,15 +178,15 @@ class LedgerStore internal constructor(
                 replacePendingImports(
                     normalizePendingImports(
                         pendingImports + PendingLedgerImport(
-                            signature = entry.signature,
-                            type = entry.type,
-                            amountInCents = entry.amountInCents,
-                            account = entry.account,
-                            category = entry.category,
-                            note = entry.note,
-                            receiptText = entry.receiptText,
-                            happenedAt = entry.happenedAt,
-                            sourceLabel = entry.note
+                            signature = resolvedEntry.signature,
+                            type = resolvedEntry.type,
+                            amountInCents = resolvedEntry.amountInCents,
+                            account = resolvedEntry.account,
+                            category = resolvedEntry.category,
+                            note = resolvedEntry.note,
+                            receiptText = resolvedEntry.receiptText,
+                            happenedAt = resolvedEntry.happenedAt,
+                            sourceLabel = resolvedEntry.note
                         )
                     )
                 )
@@ -483,12 +491,51 @@ class LedgerStore internal constructor(
         }
     }
 
+    suspend fun addAutomationRule(rule: LedgerAutomationRule) {
+        val normalizedKeyword = rule.keyword.trim().take(20)
+        val normalizedCategory = rule.category.trim().take(12)
+        val normalizedAccount = rule.account.trim().take(12)
+        if (normalizedKeyword.isBlank() || normalizedCategory.isBlank()) {
+            return
+        }
+
+        withContext(Dispatchers.IO) {
+            withWriteTransaction {
+                val metadata = metadataOrDefault()
+                val existingRules = metadata.toAutomationRules()
+                val updatedRules = normalizeAutomationRules(
+                    existingRules.filterNot { existingRule ->
+                        existingRule.type == rule.type &&
+                            existingRule.keyword.trim().equals(normalizedKeyword, ignoreCase = true)
+                    } + rule.copy(
+                        keyword = normalizedKeyword,
+                        category = normalizedCategory,
+                        account = normalizedAccount
+                    )
+                )
+                dao.upsertMetadata(metadata.withAutomationRules(updatedRules))
+            }
+        }
+    }
+
+    suspend fun deleteAutomationRule(ruleId: String) {
+        withContext(Dispatchers.IO) {
+            withWriteTransaction {
+                val metadata = metadataOrDefault()
+                val updatedRules = metadata.toAutomationRules()
+                    .filterNot { rule -> rule.id == ruleId }
+                dao.upsertMetadata(metadata.withAutomationRules(updatedRules))
+            }
+        }
+    }
+
     fun exportBackupJson(): String {
         return LedgerJsonCodec.exportBackupJson(
             entries = _entries.value,
             templates = _templates.value,
             budgetConfig = _budgetConfig.value,
-            profileConfig = _profileConfig.value
+            profileConfig = _profileConfig.value,
+            automationRules = _automationRules.value
         )
     }
 
@@ -553,6 +600,7 @@ class LedgerStore internal constructor(
                 val metadata = metadataOrDefault()
                 val budgetConfig = metadata.toBudgetConfig()
                 val profileConfig = metadata.toProfileConfig()
+                val automationRules = metadata.toAutomationRules()
 
                 val updatedEntries = when (mode) {
                     LedgerImportMode.REPLACE -> backupPayload.entries
@@ -582,6 +630,10 @@ class LedgerStore internal constructor(
                             backupPayload.profileConfig.customIncomeCategories).distinct().sorted()
                     )
                 }
+                val updatedAutomationRules = when (mode) {
+                    LedgerImportMode.REPLACE -> normalizeAutomationRules(backupPayload.automationRules)
+                    LedgerImportMode.MERGE -> mergeAutomationRules(automationRules, backupPayload.automationRules)
+                }
 
                 replaceEntries(updatedEntries)
                 replaceTemplates(updatedTemplates)
@@ -589,6 +641,7 @@ class LedgerStore internal constructor(
                     metadata
                         .withBudgetConfig(updatedBudgetConfig)
                         .withProfileConfig(updatedProfileConfig)
+                        .withAutomationRules(updatedAutomationRules)
                 )
                 true
             }
@@ -620,22 +673,28 @@ class LedgerStore internal constructor(
                 val existingEntries = dao.getEntries().map { entity -> entity.toModel() }
                 val metadata = metadataOrDefault()
                 val profileConfig = metadata.toProfileConfig()
-                val mergedEntries = mergeEntries(existingEntries, normalizedImportedEntries)
+                val automationRules = metadata.toAutomationRules()
+                val ruledEntries = normalizeEntries(
+                    normalizedImportedEntries.map { entry ->
+                        entry.applyAutomationRules(automationRules)
+                    }
+                )
+                val mergedEntries = mergeEntries(existingEntries, ruledEntries)
                 val importedCount = (mergedEntries.size - existingEntries.size).coerceAtLeast(0)
                 val updatedProfileConfig = profileConfig.copy(
                     customAccounts = (profileConfig.customAccounts +
-                        normalizedImportedEntries.map { entry -> entry.account })
+                        ruledEntries.map { entry -> entry.account })
                         .filter { account -> account.isNotBlank() }
                         .distinct()
                         .sorted(),
                     customExpenseCategories = (profileConfig.customExpenseCategories +
-                        normalizedImportedEntries.filter { entry -> entry.type == LedgerEntryType.EXPENSE }
+                        ruledEntries.filter { entry -> entry.type == LedgerEntryType.EXPENSE }
                             .map { entry -> entry.category })
                         .filter { category -> category.isNotBlank() }
                         .distinct()
                         .sorted(),
                     customIncomeCategories = (profileConfig.customIncomeCategories +
-                        normalizedImportedEntries.filter { entry -> entry.type == LedgerEntryType.INCOME }
+                        ruledEntries.filter { entry -> entry.type == LedgerEntryType.INCOME }
                             .map { entry -> entry.category })
                         .filter { category -> category.isNotBlank() }
                         .distinct()
@@ -650,9 +709,9 @@ class LedgerStore internal constructor(
                 }
 
                 LedgerStatementImportResult(
-                    totalCount = normalizedImportedEntries.size,
+                    totalCount = ruledEntries.size,
                     importedCount = importedCount,
-                    skippedCount = normalizedImportedEntries.size - importedCount
+                    skippedCount = ruledEntries.size - importedCount
                 )
             }
         }
@@ -712,6 +771,7 @@ class LedgerStore internal constructor(
             templates = normalizeTemplates(dao.getTemplates().map { entity -> entity.toModel() }),
             budgetConfig = metadata.toBudgetConfig(),
             profileConfig = metadata.toProfileConfig(),
+            automationRules = metadata.toAutomationRules(),
             automationTrace = metadata.toAutomationTrace(),
             pendingImports = normalizePendingImports(dao.getPendingImports().map { entity -> entity.toModel() }),
             securityConfig = metadata.toSecurityConfig()
@@ -733,6 +793,7 @@ class LedgerStore internal constructor(
         _templates.value = snapshot.templates
         _budgetConfig.value = snapshot.budgetConfig
         _profileConfig.value = snapshot.profileConfig
+        _automationRules.value = snapshot.automationRules
         _automationTrace.value = snapshot.automationTrace
         _pendingImports.value = snapshot.pendingImports
         _securityConfig.value = snapshot.securityConfig
@@ -811,6 +872,68 @@ class LedgerStore internal constructor(
         return normalizeTemplates(existingTemplates + importedTemplates.filterNot { template ->
             template.id in existingIds
         })
+    }
+
+    private fun mergeAutomationRules(
+        existingRules: List<LedgerAutomationRule>,
+        importedRules: List<LedgerAutomationRule>
+    ): List<LedgerAutomationRule> {
+        val existingIds = existingRules.map { rule -> rule.id }.toSet()
+        val merged = existingRules + importedRules.filterNot { importedRule ->
+            importedRule.id in existingIds || existingRules.any { existingRule ->
+                existingRule.type == importedRule.type &&
+                    existingRule.keyword.trim().equals(importedRule.keyword.trim(), ignoreCase = true) &&
+                    existingRule.category == importedRule.category &&
+                    existingRule.account == importedRule.account
+            }
+        }
+        return normalizeAutomationRules(merged)
+    }
+
+    private fun normalizeAutomationRules(rules: List<LedgerAutomationRule>): List<LedgerAutomationRule> {
+        return rules
+            .filter { rule -> rule.keyword.trim().isNotBlank() && rule.category.trim().isNotBlank() }
+            .distinctBy { rule ->
+                "${rule.type.name}|${rule.keyword.trim().lowercase()}|${rule.category.trim()}|${rule.account.trim()}"
+            }
+            .sortedWith(
+                compareByDescending<LedgerAutomationRule> { rule -> rule.keyword.trim().length }
+                    .thenByDescending { rule -> rule.createdAt }
+            )
+    }
+
+    private fun AutoImportedEntry.applyAutomationRules(
+        rules: List<LedgerAutomationRule>
+    ): AutoImportedEntry {
+        val match = applyAutomationRule(
+            rules = rules,
+            type = type,
+            currentCategory = category,
+            currentAccount = account,
+            matchText = listOf(note, receiptText, category, account).joinToString("\n")
+        ) ?: return this
+
+        return copy(
+            category = match.category,
+            account = match.account
+        )
+    }
+
+    private fun LedgerEntry.applyAutomationRules(
+        rules: List<LedgerAutomationRule>
+    ): LedgerEntry {
+        val match = applyAutomationRule(
+            rules = rules,
+            type = type,
+            currentCategory = category,
+            currentAccount = account,
+            matchText = listOf(note, category, account).joinToString("\n")
+        ) ?: return this
+
+        return copy(
+            category = match.category,
+            account = match.account
+        )
     }
 
     private fun csvEscape(value: String): String {

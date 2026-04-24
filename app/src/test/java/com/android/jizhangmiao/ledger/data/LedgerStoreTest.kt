@@ -40,6 +40,46 @@ class LedgerStoreTest {
     }
 
     @Test
+    fun importAutoEntry_appliesAutomationRule_beforeDuplicateCheck() = withStore { store ->
+        store.addEntry(
+            LedgerEntry(
+                id = "saved-entry",
+                type = LedgerEntryType.EXPENSE,
+                amountInCents = 1_880L,
+                account = "bank",
+                category = "food",
+                note = "coffee order",
+                happenedAt = 1_710_000_000_000L,
+                updatedAt = 1_710_000_000_000L
+            )
+        )
+        store.addAutomationRule(
+            LedgerAutomationRule(
+                keyword = "coffee",
+                type = LedgerEntryType.EXPENSE,
+                category = "food",
+                account = "bank"
+            )
+        )
+
+        val imported = AutoImportedEntry(
+            signature = "sig-rule-duplicate",
+            type = LedgerEntryType.EXPENSE,
+            amountInCents = 1_880L,
+            account = "wallet",
+            category = "other",
+            note = "coffee order",
+            receiptText = "coffee order paid",
+            happenedAt = 1_710_000_000_000L
+        )
+
+        val importedResult = store.importAutoEntry(imported)
+
+        assertFalse(importedResult)
+        assertTrue(store.pendingImports.value.isEmpty())
+    }
+
+    @Test
     fun approvePendingImport_movesCandidateIntoEntries() = withStore { store ->
         val imported = AutoImportedEntry(
             signature = "sig-approve",
@@ -168,9 +208,9 @@ class LedgerStoreTest {
                 id = "existing-entry",
                 type = LedgerEntryType.EXPENSE,
                 amountInCents = 1_500L,
-                account = "微信",
-                category = "餐饮",
-                note = "早餐",
+                account = "wechat",
+                category = "food",
+                note = "breakfast",
                 happenedAt = 1_710_000_000_000L,
                 updatedAt = 1_710_000_000_000L
             )
@@ -181,18 +221,18 @@ class LedgerStoreTest {
                 LedgerEntry(
                     type = LedgerEntryType.EXPENSE,
                     amountInCents = 1_500L,
-                    account = "微信",
-                    category = "餐饮",
-                    note = "早餐",
+                    account = "wechat",
+                    category = "food",
+                    note = "breakfast",
                     happenedAt = 1_710_000_000_000L,
                     updatedAt = 1_710_000_000_000L
                 ),
                 LedgerEntry(
                     type = LedgerEntryType.INCOME,
                     amountInCents = 8_800L,
-                    account = "支付宝",
-                    category = "退款",
-                    note = "售后退款",
+                    account = "alipay",
+                    category = "refund",
+                    note = "after-sale refund",
                     happenedAt = 1_710_000_800_000L,
                     updatedAt = 1_710_000_800_000L
                 )
@@ -203,9 +243,54 @@ class LedgerStoreTest {
         assertEquals(1, result.importedCount)
         assertEquals(1, result.skippedCount)
         assertEquals(2, store.entries.value.size)
-        assertTrue(store.entries.value.any { entry -> entry.category == "退款" })
-        assertTrue(store.profileConfig.value.customAccounts.contains("支付宝"))
-        assertTrue(store.profileConfig.value.customIncomeCategories.contains("退款"))
+        assertTrue(store.entries.value.any { entry -> entry.category == "refund" })
+        assertTrue(store.profileConfig.value.customAccounts.contains("alipay"))
+        assertTrue(store.profileConfig.value.customIncomeCategories.contains("refund"))
+    }
+
+    @Test
+    fun importStatementEntries_appliesAutomationRule_beforeMerge() = withStore { store ->
+        store.addEntry(
+            LedgerEntry(
+                id = "saved-income",
+                type = LedgerEntryType.INCOME,
+                amountInCents = 8_800L,
+                account = "bank",
+                category = "salary",
+                note = "april salary payout",
+                happenedAt = 1_710_000_800_000L,
+                updatedAt = 1_710_000_800_000L
+            )
+        )
+        store.addAutomationRule(
+            LedgerAutomationRule(
+                keyword = "salary",
+                type = LedgerEntryType.INCOME,
+                category = "salary",
+                account = "bank"
+            )
+        )
+
+        val result = store.importStatementEntries(
+            listOf(
+                LedgerEntry(
+                    type = LedgerEntryType.INCOME,
+                    amountInCents = 8_800L,
+                    account = "wallet",
+                    category = "other",
+                    note = "april salary payout",
+                    happenedAt = 1_710_000_800_000L,
+                    updatedAt = 1_710_000_800_000L
+                )
+            )
+        )
+
+        assertEquals(1, result.totalCount)
+        assertEquals(0, result.importedCount)
+        assertEquals(1, result.skippedCount)
+        assertEquals(1, store.entries.value.size)
+        assertEquals("salary", store.entries.value.first().category)
+        assertEquals("bank", store.entries.value.first().account)
     }
 
     @Test

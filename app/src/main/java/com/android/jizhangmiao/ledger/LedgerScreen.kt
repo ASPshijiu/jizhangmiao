@@ -88,6 +88,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.android.jizhangmiao.ledger.data.LedgerAutomationRule
 import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
 import com.android.jizhangmiao.ledger.data.LedgerEntry
@@ -155,8 +156,10 @@ fun LedgerScreen(
     onIgnorePendingImport: (PendingLedgerImport) -> Unit,
     onAddAccount: (String) -> Unit,
     onAddCategory: (LedgerEntryType, String) -> Unit,
+    onAddAutomationRule: (String, LedgerEntryType, String, String) -> Unit,
     onRenameAccount: (String, String) -> Unit,
     onRenameCategory: (LedgerEntryType, String, String) -> Unit,
+    onDeleteAutomationRule: (LedgerAutomationRule) -> Unit,
     onUnlockPin: (String) -> Unit,
     onSetPin: (String) -> Unit,
     onDisablePin: () -> Unit,
@@ -608,6 +611,7 @@ fun LedgerScreen(
 
                             LedgerBoard.SETTINGS -> SettingsBoard(
                                 profileConfig = uiState.profileConfig,
+                                automationRules = uiState.automationRules,
                                 automationTrace = uiState.automationTrace,
                                 pendingImports = uiState.pendingImports,
                                 securityConfig = uiState.securityConfig,
@@ -621,8 +625,10 @@ fun LedgerScreen(
                                 onIgnorePendingImport = onIgnorePendingImport,
                                 onAddAccount = onAddAccount,
                                 onAddCategory = onAddCategory,
+                                onAddAutomationRule = onAddAutomationRule,
                                 onRenameAccount = onRenameAccount,
                                 onRenameCategory = onRenameCategory,
+                                onDeleteAutomationRule = onDeleteAutomationRule,
                                 onUnlockPin = onUnlockPin,
                                 onSetPin = onSetPin,
                                 onDisablePin = onDisablePin,
@@ -1405,6 +1411,7 @@ private fun BudgetBoard(
 @Composable
 private fun SettingsBoard(
     profileConfig: LedgerProfileConfig,
+    automationRules: List<LedgerAutomationRule>,
     automationTrace: LedgerAutomationTrace,
     pendingImports: List<PendingLedgerImport>,
     securityConfig: LedgerSecurityConfig,
@@ -1416,8 +1423,10 @@ private fun SettingsBoard(
     onIgnorePendingImport: (PendingLedgerImport) -> Unit,
     onAddAccount: (String) -> Unit,
     onAddCategory: (LedgerEntryType, String) -> Unit,
+    onAddAutomationRule: (String, LedgerEntryType, String, String) -> Unit,
     onRenameAccount: (String, String) -> Unit,
     onRenameCategory: (LedgerEntryType, String, String) -> Unit,
+    onDeleteAutomationRule: (LedgerAutomationRule) -> Unit,
     onUnlockPin: (String) -> Unit,
     onSetPin: (String) -> Unit,
     onDisablePin: () -> Unit,
@@ -1477,6 +1486,17 @@ private fun SettingsBoard(
                 onAddCategory = onAddCategory,
                 onRenameAccount = onRenameAccount,
                 onRenameCategory = onRenameCategory
+            )
+        }
+
+        item {
+            AutomationRuleSection(
+                rules = automationRules,
+                accounts = accounts,
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                onAddAutomationRule = onAddAutomationRule,
+                onDeleteAutomationRule = onDeleteAutomationRule
             )
         }
 
@@ -3883,6 +3903,215 @@ private fun ProfileInputRow(
             shape = RoundedCornerShape(18.dp)
         ) {
             Text(buttonText)
+        }
+    }
+}
+
+@Composable
+private fun AutomationRuleSection(
+    rules: List<LedgerAutomationRule>,
+    accounts: List<String>,
+    expenseCategories: List<String>,
+    incomeCategories: List<String>,
+    onAddAutomationRule: (String, LedgerEntryType, String, String) -> Unit,
+    onDeleteAutomationRule: (LedgerAutomationRule) -> Unit
+) {
+    var keywordInput by rememberSaveable { mutableStateOf("") }
+    var categoryInput by rememberSaveable { mutableStateOf("") }
+    var accountInput by rememberSaveable { mutableStateOf("") }
+    var ruleTypeName by rememberSaveable { mutableStateOf(LedgerEntryType.EXPENSE.name) }
+
+    val ruleType = remember(ruleTypeName) { LedgerEntryType.valueOf(ruleTypeName) }
+    val categoryOptions = remember(ruleType, expenseCategories, incomeCategories) {
+        when (ruleType) {
+            LedgerEntryType.EXPENSE -> expenseCategories
+            LedgerEntryType.INCOME -> incomeCategories
+        }
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SectionHeading(
+                title = "\u81ea\u52a8\u5206\u7c7b\u89c4\u5219",
+                subtitle = "\u5bfc\u5165\u8d26\u5355\u6216\u81ea\u52a8\u8bb0\u8d26\u547d\u4e2d\u5173\u952e\u8bcd\u540e\uff0c\u4f1a\u76f4\u63a5\u5957\u7528\u4f60\u6307\u5b9a\u7684\u5206\u7c7b\u548c\u8d26\u6237"
+            )
+
+            OutlinedTextField(
+                value = keywordInput,
+                onValueChange = { keywordInput = it.take(20) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("\u5339\u914d\u5173\u952e\u8bcd") },
+                singleLine = true,
+                shape = RoundedCornerShape(18.dp)
+            )
+
+            SectionEyebrow("\u89c4\u5219\u7c7b\u578b")
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(LedgerEntryType.entries.toList()) { type ->
+                    FilterChip(
+                        selected = type == ruleType,
+                        onClick = { ruleTypeName = type.name },
+                        label = { Text(type.displayName()) }
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = categoryInput,
+                onValueChange = { categoryInput = it.take(12) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("\u81ea\u52a8\u5f52\u7c7b\u5230") },
+                singleLine = true,
+                shape = RoundedCornerShape(18.dp)
+            )
+
+            OutlinedTextField(
+                value = accountInput,
+                onValueChange = { accountInput = it.take(12) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("\u81ea\u52a8\u5207\u6362\u8d26\u6237\uff08\u53ef\u9009\uff09") },
+                singleLine = true,
+                shape = RoundedCornerShape(18.dp)
+            )
+
+            if (categoryOptions.isNotEmpty()) {
+                SectionEyebrow("\u5feb\u901f\u9009\u5206\u7c7b")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(categoryOptions.take(12)) { category ->
+                        FilterChip(
+                            selected = categoryInput == category,
+                            onClick = { categoryInput = category },
+                            label = { Text(category) }
+                        )
+                    }
+                }
+            }
+
+            if (accounts.isNotEmpty()) {
+                SectionEyebrow("\u5feb\u901f\u9009\u8d26\u6237")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(accounts.take(12)) { account ->
+                        FilterChip(
+                            selected = accountInput == account,
+                            onClick = { accountInput = account },
+                            label = { Text(account) }
+                        )
+                    }
+                }
+            }
+
+            Button(
+                onClick = {
+                    onAddAutomationRule(keywordInput, ruleType, categoryInput, accountInput)
+                    keywordInput = ""
+                    categoryInput = ""
+                    accountInput = ""
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = keywordInput.isNotBlank() && categoryInput.isNotBlank(),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Text("\u4fdd\u5b58\u89c4\u5219")
+            }
+
+            SectionEyebrow("\u89c4\u5219\u8bf4\u660e")
+            Text(
+                text = "\u540c\u4e00\u7c7b\u578b\u4e0b\u4f1a\u4f18\u5148\u5339\u914d\u66f4\u957f\u7684\u5173\u952e\u8bcd\uff0c\u5982\u679c\u5173\u952e\u8bcd\u957f\u5ea6\u4e00\u6837\uff0c\u5219\u4f18\u5148\u4f7f\u7528\u66f4\u65b0\u4fdd\u5b58\u7684\u89c4\u5219\u3002"
+                    + if (rules.isEmpty()) {
+                        "\u73b0\u5728\u8fd8\u6ca1\u6709\u89c4\u5219\uff0c\u53ef\u4ee5\u5148\u4e3a\u5e38\u89c1\u5546\u6237\u914d\u4e00\u6279\u3002"
+                    } else {
+                        ""
+                    },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (rules.isEmpty()) {
+                EmptyLedgerSection(
+                    title = "\u8fd8\u6ca1\u6709\u81ea\u52a8\u5206\u7c7b\u89c4\u5219",
+                    subtitle = "\u6bd4\u5982\u53ef\u4ee5\u8bbe\u7f6e\u300c\u7f8e\u56e2\u300d\u81ea\u52a8\u5f52\u5230\u9910\u996e\uff0c\u6216\u628a\u300c\u5de5\u8d44\u300d\u81ea\u52a8\u5207\u5230\u94f6\u884c\u5361\u3002"
+                )
+            } else {
+                SectionEyebrow("\u5df2\u4fdd\u5b58 ${rules.size} \u6761")
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    rules.forEach { rule ->
+                        AutomationRuleCard(
+                            rule = rule,
+                            onDeleteAutomationRule = { onDeleteAutomationRule(rule) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutomationRuleCard(
+    rule: LedgerAutomationRule,
+    onDeleteAutomationRule: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "\u5173\u952e\u8bcd\uff1a${rule.keyword}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Surface(
+                    color = if (rule.type == LedgerEntryType.INCOME) {
+                        IncomeTint.copy(alpha = 0.12f)
+                    } else {
+                        ExpenseTint.copy(alpha = 0.12f)
+                    },
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Text(
+                        text = rule.type.displayName(),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (rule.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
+                    )
+                }
+            }
+
+            Text(
+                text = if (rule.account.isBlank()) {
+                    "\u547d\u4e2d\u540e\u81ea\u52a8\u5f52\u5230 ${rule.category}\uff0c\u4fdd\u7559\u539f\u8d26\u6237"
+                } else {
+                    "\u547d\u4e2d\u540e\u81ea\u52a8\u5f52\u5230 ${rule.category}\uff0c\u5e76\u5207\u6362\u5230 ${rule.account}"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            TextButton(
+                onClick = onDeleteAutomationRule,
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Text("\u5220\u9664")
+            }
         }
     }
 }

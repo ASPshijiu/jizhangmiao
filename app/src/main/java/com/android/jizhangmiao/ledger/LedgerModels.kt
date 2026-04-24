@@ -1,6 +1,7 @@
 package com.android.jizhangmiao.ledger
 
 import com.android.jizhangmiao.ledger.data.LedgerBudgetConfig
+import com.android.jizhangmiao.ledger.data.LedgerAutomationRule
 import com.android.jizhangmiao.ledger.data.LedgerAutomationTrace
 import com.android.jizhangmiao.ledger.data.LedgerProfileConfig
 import com.android.jizhangmiao.ledger.data.LedgerSecurityConfig
@@ -166,6 +167,7 @@ data class LedgerUiState(
     val templates: List<LedgerTemplate> = emptyList(),
     val budgetConfig: LedgerBudgetConfig = LedgerBudgetConfig(),
     val profileConfig: LedgerProfileConfig = LedgerProfileConfig(),
+    val automationRules: List<LedgerAutomationRule> = emptyList(),
     val automationTrace: LedgerAutomationTrace = LedgerAutomationTrace(),
     val pendingImports: List<PendingLedgerImport> = emptyList(),
     val securityConfig: LedgerSecurityConfig = LedgerSecurityConfig(),
