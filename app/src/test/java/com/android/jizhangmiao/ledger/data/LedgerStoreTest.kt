@@ -64,6 +64,33 @@ class LedgerStoreTest {
     }
 
     @Test
+    fun importAutoEntry_blocksOppositeTypePendingDuplicateWithinWindow() = withStore { store ->
+        val expense = AutoImportedEntry(
+            signature = "sig-transfer-expense",
+            type = LedgerEntryType.EXPENSE,
+            amountInCents = 10_000L,
+            account = "wechat",
+            category = "daily",
+            note = "auto import: transfer paid",
+            receiptText = "transfer paid 100.00",
+            happenedAt = 1_710_000_000_000L
+        )
+        val income = expense.copy(
+            signature = "sig-transfer-income",
+            type = LedgerEntryType.INCOME,
+            category = "other",
+            note = "auto import: transfer received",
+            receiptText = "transfer received 100.00",
+            happenedAt = 1_710_000_030_000L
+        )
+
+        assertTrue(store.importAutoEntry(expense))
+        assertFalse(store.importAutoEntry(income))
+        assertEquals(1, store.pendingImports.value.size)
+        assertEquals(LedgerEntryType.EXPENSE, store.pendingImports.value.first().type)
+    }
+
+    @Test
     fun importAutoEntry_appliesAutomationRule_beforeDuplicateCheck() = withStore { store ->
         store.addEntry(
             LedgerEntry(

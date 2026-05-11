@@ -169,6 +169,9 @@ class PaymentAccessibilityService : AccessibilityService() {
         serviceScope.launch {
             val store = LedgerStore.getInstance(applicationContext)
             val imported = store.importAutoEntry(candidate)
+            if (imported) {
+                showAutoImportConfirmation(applicationContext)
+            }
             store.recordAutomationTrace(
                 LedgerAutomationTrace(
                     sourceLabel = sourceLabel,

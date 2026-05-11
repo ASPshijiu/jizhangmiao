@@ -137,6 +137,26 @@ class NotificationAutomationTest {
     }
 
     @Test
+    fun analyzeAutoImportedEntry_ignoresTransferLikeEvents() {
+        val analysis = analyzeAutoImportedEntry(
+            packageName = WeChatPackageName,
+            mergedText = listOf(
+                "\u5fae\u4fe1\u652f\u4ed8",
+                "\u8f6c\u8d26\u6210\u529f",
+                "\u5df2\u6536\u94b1",
+                "\u652f\u4ed8\u6210\u529f",
+                "\u00a5100.00"
+            ).joinToString("\n"),
+            dedupeSeed = "wechat-transfer",
+            happenedAt = 1_710_000_400_000L,
+            sourceLabel = "\u9875\u9762\u8bc6\u522b"
+        )
+
+        assertNull(analysis.candidate)
+        assertTrue(analysis.statusSummary.contains("\u8f6c\u8d26"))
+    }
+
+    @Test
     fun normalizeCollectedText_filtersNumericOnlyBlankAndDuplicates() {
         val normalized = normalizeCollectedText(
             listOf(

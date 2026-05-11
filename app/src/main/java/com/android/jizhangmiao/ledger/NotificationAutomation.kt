@@ -95,6 +95,25 @@ private val expenseKeywords = listOf(
     "paidsuccessfully"
 )
 
+private val transferKeywords = listOf(
+    "\u8f6c\u8d26",
+    "\u8f6c\u7ed9",
+    "\u8f6c\u5165",
+    "\u8f6c\u51fa",
+    "\u6536\u5230\u8f6c\u8d26",
+    "\u8f6c\u8d26\u5230\u8d26",
+    "\u8f6c\u8d26\u6210\u529f",
+    "\u5df2\u8f6c\u8d26",
+    "\u4f59\u989d\u5b9d\u8f6c\u5165",
+    "\u4f59\u989d\u5b9d\u8f6c\u51fa",
+    "\u96f6\u94b1\u901a\u8f6c\u5165",
+    "\u96f6\u94b1\u901a\u8f6c\u51fa",
+    "\u94f6\u884c\u5361\u8f6c\u5165",
+    "\u94f6\u884c\u5361\u8f6c\u51fa",
+    "\u4f59\u989d\u8f6c\u5165",
+    "\u4f59\u989d\u8f6c\u51fa"
+)
+
 private val transactionKeywords = (incomeKeywords + expenseKeywords + listOf(
     "\u652f\u4ed8",
     "\u4ed8\u6b3e",
@@ -288,6 +307,14 @@ internal fun analyzeAutoImportedEntry(
     } else {
         "\u652f\u4ed8\u5b9d"
     }
+    if (isTransferLikeEvent(normalizedContent)) {
+        return AutoImportAnalysis(
+            candidate = null,
+            mergedText = normalizedReceiptText.take(400),
+            statusSummary = buildTraceSummary(sourceName, sourceLabel, "\u5df2\u5ffd\u7565\u8f6c\u8d26\u7c7b\u4e8b\u4ef6\uff0c\u907f\u514d\u91cd\u590d\u751f\u6210\u6536\u5165\u548c\u652f\u51fa")
+        )
+    }
+
     val type = detectEntryType(normalizedContent)
     if (type == null) {
         return AutoImportAnalysis(
@@ -367,6 +394,7 @@ private fun isAccessibilityAutomationEnabled(context: Context): Boolean {
         }
 }
 
+@Suppress("DEPRECATION")
 internal fun collectNotificationText(notification: Notification): String {
     val extras = notification.extras
     val rawTexts = mutableListOf<String>()
@@ -379,20 +407,31 @@ internal fun collectNotificationText(notification: Notification): String {
         notification.tickerText?.toString()
     ).forEach(rawTexts::add)
 
-    extras?.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-        ?.map(CharSequence::toString)
-        ?.forEach(rawTexts::add)
+    extras?.get(Notification.EXTRA_TEXT_LINES)
+        ?.let { value -> appendNotificationTextValue(value, rawTexts) }
 
     extras?.keySet()?.forEach { key ->
-        extras.getCharSequence(key)?.let { value ->
-            rawTexts += value.toString()
-        }
-        extras.getCharSequenceArray(key)
-            ?.map(CharSequence::toString)
-            ?.forEach(rawTexts::add)
+        appendNotificationTextValue(extras.get(key), rawTexts)
     }
 
     return normalizeCollectedText(rawTexts)
+}
+
+private fun appendNotificationTextValue(
+    value: Any?,
+    rawTexts: MutableList<String>
+) {
+    when (value) {
+        is CharSequence -> rawTexts += value.toString()
+        is Array<*> -> value
+            .filterIsInstance<CharSequence>()
+            .map(CharSequence::toString)
+            .forEach(rawTexts::add)
+        is Iterable<*> -> value
+            .filterIsInstance<CharSequence>()
+            .map(CharSequence::toString)
+            .forEach(rawTexts::add)
+    }
 }
 
 private fun sourceNameFor(packageName: String): String {
@@ -440,6 +479,12 @@ private fun detectEntryType(normalizedContent: String): LedgerEntryType? {
             LedgerEntryType.EXPENSE
         }
         else -> null
+    }
+}
+
+private fun isTransferLikeEvent(normalizedContent: String): Boolean {
+    return transferKeywords.any { keyword ->
+        normalizedContent.contains(normalizeForMatching(keyword))
     }
 }
 

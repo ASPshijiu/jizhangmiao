@@ -6,13 +6,13 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,22 +26,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.PagerState
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -50,6 +47,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
@@ -58,14 +56,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -76,13 +73,15 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -112,7 +111,6 @@ import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 
@@ -125,9 +123,9 @@ private val ChartPalette = listOf(
     Color(0xFFF2A93B),
     Color(0xFF8E6CCF)
 )
-private val HeroShape = RoundedCornerShape(32.dp)
-private val SectionShape = RoundedCornerShape(28.dp)
-private val EntryShape = RoundedCornerShape(24.dp)
+private val HeroShape = RoundedCornerShape(16.dp)
+private val SectionShape = RoundedCornerShape(14.dp)
+private val EntryShape = RoundedCornerShape(12.dp)
 private val EntryTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("M\u6708d\u65e5 HH:mm", Locale.CHINA)
 
@@ -207,8 +205,13 @@ fun LedgerScreen(
             LedgerBoard.SETTINGS
         )
     }
-    val pagerState = rememberPagerState(pageCount = { boards.size })
-    val coroutineScope = rememberCoroutineScope()
+    var selectedBoardName by rememberSaveable { mutableStateOf(LedgerBoard.ENTRY.name) }
+    val currentBoardIndex = remember(boards, selectedBoardName) {
+        boards.indexOfFirst { board -> board.name == selectedBoardName }
+            .takeIf { index -> index >= 0 }
+            ?: 0
+    }
+    val currentBoard = boards[currentBoardIndex]
     val boardTabState = rememberLazyListState()
 
     val filteredEntries = remember(
@@ -305,7 +308,12 @@ fun LedgerScreen(
             }
         }
     }
-    val currentBoard = boards[pagerState.currentPage.coerceIn(0, boards.lastIndex)]
+    var activePendingPromptId by rememberSaveable { mutableStateOf<String?>(null) }
+    var deferredPendingPromptId by rememberSaveable { mutableStateOf<String?>(null) }
+    val firstPendingImport = uiState.pendingImports.firstOrNull()
+    val pendingImportPrompt = uiState.pendingImports.firstOrNull { pendingImport ->
+        pendingImport.id == activePendingPromptId
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -347,153 +355,194 @@ fun LedgerScreen(
         uri?.let(onScanReceipt)
     }
     val openBoard: (LedgerBoard) -> Unit = { board ->
-        val targetPage = boards.indexOf(board)
-        if (targetPage >= 0) {
-            coroutineScope.launch {
-                pagerState.animateScrollToPage(targetPage)
-            }
+        if (board in boards) {
+            selectedBoardName = board.name
+        }
+    }
+    val openAdjacentBoard: (Int) -> Unit = { offset ->
+        val targetIndex = (currentBoardIndex + offset).coerceIn(0, boards.lastIndex)
+        if (targetIndex != currentBoardIndex) {
+            selectedBoardName = boards[targetIndex].name
         }
     }
 
-    LaunchedEffect(pagerState.currentPage) {
-        boardTabState.animateScrollToItem(pagerState.currentPage)
+    LaunchedEffect(currentBoardIndex) {
+        boardTabState.scrollToItem(currentBoardIndex)
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFFFF7EE),
-                        Color(0xFFF4F7F1),
-                        Color(0xFFFFFCF8)
+    LaunchedEffect(firstPendingImport?.id) {
+        if (firstPendingImport != null && firstPendingImport.id != deferredPendingPromptId) {
+            activePendingPromptId = firstPendingImport.id
+            selectedBoardName = LedgerBoard.ENTRY.name
+        }
+    }
+
+    val currentDensity = LocalDensity.current
+    val swipeThresholdPx = remember(currentDensity.density) {
+        with(currentDensity) { 96.dp.toPx() }
+    }
+    val compactDensity = remember(currentDensity.density, currentDensity.fontScale) {
+        Density(
+            density = currentDensity.density,
+            fontScale = currentDensity.fontScale.coerceAtMost(0.92f)
+        )
+    }
+
+    CompositionLocalProvider(
+        LocalDensity provides compactDensity,
+        LocalMinimumInteractiveComponentSize provides 40.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xFFFFF7EE),
+                            Color(0xFFF4F7F1),
+                            Color(0xFFFFFCF8)
+                        )
                     )
                 )
-            )
-    ) {
-        DecorativeBackdrop()
+        ) {
+            DecorativeBackdrop()
 
-        Scaffold(
-            containerColor = Color.Transparent,
-            topBar = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    CenterAlignedTopAppBar(
-                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                            containerColor = Color.Transparent,
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        title = {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "\u8bb0\u8d26\u55b5",
-                                    style = MaterialTheme.typography.titleLarge
+            Scaffold(
+                containerColor = Color.Transparent,
+                topBar = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.White.copy(alpha = 0.78f))
+                            .statusBarsPadding()
+                            .padding(top = 4.dp, bottom = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "\u8bb0\u8d26\u55b5",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.SemiBold
                                 )
-                                Text(
-                                    text = currentBoard.subtitle(),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "${currentBoardIndex + 1}/${boards.size} ${currentBoard.displayName()}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        LazyRow(
+                            state = boardTabState,
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(boards) { board ->
+                                BoardNavChip(
+                                    board = board,
+                                    selected = board == currentBoard,
+                                    onClick = {
+                                        openBoard(board)
+                                    }
                                 )
                             }
                         }
-                    )
-                    LazyRow(
-                        state = boardTabState,
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(boards) { board ->
-                            FilterChip(
-                                selected = board == currentBoard,
-                                onClick = {
-                                    openBoard(board)
-                                },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                    selectedLabelColor = MaterialTheme.colorScheme.primary
-                                ),
-                                label = {
-                                    Text(board.displayName())
-                                }
+                    }
+                }
+            ) { innerPadding ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            top = innerPadding.calculateTopPadding(),
+                            bottom = innerPadding.calculateBottomPadding()
+                        )
+                ) {
+                    AnimatedVisibility(visible = uiState.statusMessage != null) {
+                        Box(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            StatusBanner(
+                                message = uiState.statusMessage.orEmpty(),
+                                onDismiss = onDismissStatusMessage
                             )
                         }
                     }
-                    BoardPaginationIndicator(
-                        boards = boards,
-                        pagerState = pagerState,
-                        onBoardSelected = openBoard
-                    )
-                }
-            }
-        ) { innerPadding ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(
-                        top = innerPadding.calculateTopPadding(),
-                        bottom = innerPadding.calculateBottomPadding()
-                    )
-            ) {
-                AnimatedVisibility(visible = uiState.statusMessage != null) {
-                    Box(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                    ) {
-                        StatusBanner(
-                            message = uiState.statusMessage.orEmpty(),
-                            onDismiss = onDismissStatusMessage
-                        )
-                    }
-                }
 
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                ) { page ->
                     BoardPageContainer(
-                        page = page,
-                        pagerState = pagerState
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .pointerInput(currentBoardIndex, swipeThresholdPx) {
+                                var dragDistance = 0f
+                                detectHorizontalDragGestures(
+                                    onDragStart = {
+                                        dragDistance = 0f
+                                    },
+                                    onHorizontalDrag = { change, dragAmount ->
+                                        dragDistance += dragAmount
+                                        change.consume()
+                                    },
+                                    onDragEnd = {
+                                        when {
+                                            dragDistance <= -swipeThresholdPx -> openAdjacentBoard(1)
+                                            dragDistance >= swipeThresholdPx -> openAdjacentBoard(-1)
+                                        }
+                                    },
+                                    onDragCancel = {
+                                        dragDistance = 0f
+                                    }
+                                )
+                            }
                     ) {
-                        when (boards[page]) {
-                            LedgerBoard.ENTRY -> EntryBoard(
-                                accountOptions = availableAccounts,
-                                categoryOptions = availableCategories,
-                                recentEntries = recentEntries,
+                        when (currentBoard) {
+                                LedgerBoard.ENTRY -> EntryBoard(
+                                    accountOptions = availableAccounts,
+                                    categoryOptions = availableCategories,
+                                    recentEntries = recentEntries,
                                 form = uiState.form,
                                 isReceiptScanning = uiState.isReceiptScanning,
+                                automationTrace = uiState.automationTrace,
+                                pendingImports = uiState.pendingImports,
                                 onTypeSelected = onTypeSelected,
-                                onAmountChanged = onAmountChanged,
-                                onAccountChanged = onAccountChanged,
-                                onCategoryChanged = onCategoryChanged,
-                                onNoteChanged = onNoteChanged,
-                                onSuggestedAccountSelected = onSuggestedAccountSelected,
-                                onSuggestedCategorySelected = onSuggestedCategorySelected,
-                                onTemplateRecurrenceSelected = onTemplateRecurrenceSelected,
-                                onTemplatePlanTypeSelected = onTemplatePlanTypeSelected,
-                                onInstallmentTotalChanged = onInstallmentTotalChanged,
-                                onSaveClick = onSaveClick,
-                                onCancelEditClick = onCancelEditClick,
-                                onSaveTemplateClick = onSaveTemplateClick,
-                                onScanReceiptClick = {
-                                    receiptLauncher.launch("image/*")
-                                },
-                                onEditClick = onEditClick,
+                                    onAmountChanged = onAmountChanged,
+                                    onAccountChanged = onAccountChanged,
+                                    onCategoryChanged = onCategoryChanged,
+                                    onNoteChanged = onNoteChanged,
+                                    onSuggestedAccountSelected = onSuggestedAccountSelected,
+                                    onSuggestedCategorySelected = onSuggestedCategorySelected,
+                                    onTemplateRecurrenceSelected = onTemplateRecurrenceSelected,
+                                    onTemplatePlanTypeSelected = onTemplatePlanTypeSelected,
+                                    onInstallmentTotalChanged = onInstallmentTotalChanged,
+                                    onSaveClick = onSaveClick,
+                                    onCancelEditClick = onCancelEditClick,
+                                    onSaveTemplateClick = onSaveTemplateClick,
+                                    onScanReceiptClick = {
+                                        receiptLauncher.launch("image/*")
+                                    },
+                                    onEditClick = onEditClick,
                                 onDeleteClick = onDeleteClick,
+                                onApprovePendingImport = onApprovePendingImport,
+                                onIgnorePendingImport = onIgnorePendingImport,
                                 onViewAllEntriesClick = {
-                                    periodFilterName = LedgerPeriodFilter.ALL.name
-                                    typeFilterName = LedgerEntryFilterType.ALL.name
-                                    accountFilter = ""
-                                    categoryFilter = ""
-                                    searchQuery = ""
-                                    minAmountText = ""
-                                    maxAmountText = ""
-                                    chartDetailCategory = ""
-                                    chartDetailTypeName = ""
-                                    openBoard(LedgerBoard.LEDGER)
-                                }
-                            )
+                                        periodFilterName = LedgerPeriodFilter.ALL.name
+                                        typeFilterName = LedgerEntryFilterType.ALL.name
+                                        accountFilter = ""
+                                        categoryFilter = ""
+                                        searchQuery = ""
+                                        minAmountText = ""
+                                        maxAmountText = ""
+                                        chartDetailCategory = ""
+                                        chartDetailTypeName = ""
+                                        openBoard(LedgerBoard.LEDGER)
+                                    }
+                                )
 
                             LedgerBoard.DASHBOARD -> DashboardOverviewBoard(
                                 summary = dashboardSummary,
@@ -723,9 +772,28 @@ fun LedgerScreen(
                 onUnlockPin = onUnlockPin
             )
         }
+
+        pendingImportPrompt?.let { pendingImport ->
+            AutoImportConfirmDialog(
+                pendingImport = pendingImport,
+                onConfirm = {
+                    activePendingPromptId = null
+                    deferredPendingPromptId = null
+                    onApprovePendingImport(pendingImport)
+                },
+                onIgnore = {
+                    activePendingPromptId = null
+                    deferredPendingPromptId = null
+                    onIgnorePendingImport(pendingImport)
+                },
+                onLater = {
+                    activePendingPromptId = null
+                    deferredPendingPromptId = pendingImport.id
+                }
+            )
+        }
     }
 }
-
 @Composable
 private fun EntryBoard(
     accountOptions: List<String>,
@@ -733,6 +801,8 @@ private fun EntryBoard(
     recentEntries: List<LedgerEntry>,
     form: LedgerFormState,
     isReceiptScanning: Boolean,
+    automationTrace: LedgerAutomationTrace,
+    pendingImports: List<PendingLedgerImport>,
     onTypeSelected: (LedgerEntryType) -> Unit,
     onAmountChanged: (String) -> Unit,
     onAccountChanged: (String) -> Unit,
@@ -749,12 +819,17 @@ private fun EntryBoard(
     onScanReceiptClick: () -> Unit,
     onEditClick: (LedgerEntry) -> Unit,
     onDeleteClick: (LedgerEntry) -> Unit,
+    onApprovePendingImport: (PendingLedgerImport) -> Unit,
+    onIgnorePendingImport: (PendingLedgerImport) -> Unit,
     onViewAllEntriesClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    val automationStatus = rememberNotificationAutomationStatus()
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
             EntryEditorSection(
@@ -780,21 +855,38 @@ private fun EntryBoard(
         }
 
         item {
+            HomeAutomationCard(
+                status = automationStatus,
+                trace = automationTrace,
+                pendingImports = pendingImports,
+                onOpenNotificationAccess = {
+                    openNotificationAutomationSettings(context)
+                },
+                onOpenAccessibilityAccess = {
+                    openAccessibilityAutomationSettings(context)
+                },
+                onApprovePendingImport = onApprovePendingImport,
+                onIgnorePendingImport = onIgnorePendingImport
+            )
+        }
+
+        item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                SectionHeading(
-                    title = "\u6700\u8fd1\u8d26\u5355",
-                    subtitle = if (recentEntries.isEmpty()) {
-                        "\u8fd8\u6ca1\u6709\u8bb0\u5f55\uff0c\u53ef\u4ee5\u5148\u5728\u4e0a\u65b9\u8bb0\u4e00\u7b14"
-                    } else {
-                        "\u6700\u8fd1 ${recentEntries.size} \u7b14\u8bb0\u5f55\uff0c\u53ef\u4ee5\u76f4\u63a5\u7f16\u8f91\u6216\u5220\u9664"
-                    }
+                Text(
+                    text = "\u6700\u8fd1\u8d26\u5355",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.SemiBold
+                    )
                 )
                 if (recentEntries.isNotEmpty()) {
-                    TextButton(onClick = onViewAllEntriesClick) {
+                    TextButton(
+                        onClick = onViewAllEntriesClick,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
                         Text("\u67e5\u770b\u66f4\u591a")
                     }
                 }
@@ -1110,87 +1202,44 @@ private fun DailySummaryCard(
 }
 
 @Composable
-private fun BoardPaginationIndicator(
-    boards: List<LedgerBoard>,
-    pagerState: PagerState,
-    onBoardSelected: (LedgerBoard) -> Unit
+private fun BoardNavChip(
+    board: LedgerBoard,
+    selected: Boolean,
+    onClick: () -> Unit
 ) {
-    val pageProgress = pagerState.currentPage + pagerState.currentPageOffsetFraction
+    val chipColor = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Surface(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        color = Color.White.copy(alpha = 0.62f),
-        shape = RoundedCornerShape(24.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+        } else {
+            Color.White.copy(alpha = 0.58f)
+        },
+        shape = RoundedCornerShape(999.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = "\u677f\u5757\u5bfc\u822a",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "${pagerState.currentPage + 1}/${boards.size} ${boards[pagerState.currentPage].displayName()}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                boards.forEachIndexed { index, board ->
-                    val emphasis = (1f - (pageProgress - index).absoluteValue.coerceIn(0f, 1f))
-                    val indicatorColor by animateColorAsState(
-                        targetValue = if (emphasis > 0.5f) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)
-                        },
-                        label = "boardIndicatorColor$index"
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .width(12.dp + 22.dp * emphasis)
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(indicatorColor)
-                            .clickable {
-                                onBoardSelected(board)
-                            }
-                    )
-                }
-            }
-        }
+        Text(
+            text = board.displayName(),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = chipColor
+        )
     }
 }
 
 @Composable
 private fun BoardPageContainer(
-    page: Int,
-    pagerState: PagerState,
+    modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
-    val pageOffset = ((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction)
-        .absoluteValue
-        .coerceIn(0f, 1f)
-
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                alpha = 1f - (pageOffset * 0.18f)
-                scaleX = 1f - (pageOffset * 0.06f)
-                scaleY = 1f - (pageOffset * 0.06f)
-                translationX = pageOffset * 48f
-            }
+        modifier = modifier.fillMaxSize()
     ) {
         content()
     }
@@ -3061,51 +3110,52 @@ private fun EntryEditorSection(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = if (form.isEditing) "\u7f16\u8f91\u8bb0\u5f55" else "\u8bb0\u4e00\u7b14",
-                        style = MaterialTheme.typography.titleMedium
+                Text(
+                    text = if (form.isEditing) "\u7f16\u8f91\u8bb0\u5f55" else "\u8bb0\u4e00\u7b14",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.SemiBold
                     )
-                    Text(
-                        text = if (form.isEditing) {
-                            "\u4fee\u6539\u91d1\u989d\u3001\u8d26\u6237\u3001\u5206\u7c7b"
-                        } else {
-                            "\u5148\u586b\u91d1\u989d\u548c\u5206\u7c7b\uff0c\u8be6\u7ec6\u9879\u53ef\u4ee5\u5c55\u5f00"
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Surface(
-                    color = accentColor.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(999.dp)
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = form.type.displayName(),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelMedium,
+                    CompactActionChip(
+                        label = if (isReceiptScanning) "\u8bc6\u522b\u4e2d" else "\u626b\u5c0f\u7968",
+                        onClick = onScanReceiptClick,
                         color = accentColor
                     )
+                    Surface(
+                        color = accentColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text(
+                            text = form.type.displayName(),
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = accentColor
+                        )
+                    }
                 }
             }
 
             AnimatedVisibility(visible = form.isEditing) {
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
                         text = "\u5f53\u524d\u662f\u7f16\u8f91\u6a21\u5f0f\uff0c\u4fdd\u5b58\u540e\u4f1a\u76f4\u63a5\u8986\u76d6\u539f\u8bb0\u5f55\u3002",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
@@ -3129,20 +3179,6 @@ private fun EntryEditorSection(
                 )
             }
 
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item {
-                    FilterChip(
-                        selected = false,
-                        onClick = onScanReceiptClick,
-                        label = {
-                            Text(
-                                if (isReceiptScanning) "\u8bc6\u522b\u4e2d..." else "\u626b\u5c0f\u7968"
-                            )
-                        }
-                    )
-                }
-            }
-
             OutlinedTextField(
                 value = form.amount,
                 onValueChange = onAmountChanged,
@@ -3161,7 +3197,7 @@ private fun EntryEditorSection(
                 ),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                shape = RoundedCornerShape(18.dp)
+                shape = RoundedCornerShape(12.dp)
             )
 
             Row(
@@ -3197,12 +3233,12 @@ private fun EntryEditorSection(
             AnimatedVisibility(visible = form.errorMessage != null) {
                 Surface(
                     color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
                         text = form.errorMessage.orEmpty(),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
                 }
@@ -3216,37 +3252,50 @@ private fun EntryEditorSection(
                     Button(
                         onClick = onSaveClick,
                         modifier = Modifier.weight(1.15f),
-                        shape = RoundedCornerShape(20.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = accentColor)
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Text("\u4fdd\u5b58\u4fee\u6539")
                     }
                     OutlinedButton(
                         onClick = onCancelEditClick,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Text("\u53d6\u6d88\u7f16\u8f91")
                     }
                 }
-            } else {
-                Button(
-                    onClick = onSaveClick,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = accentColor)
-                ) {
-                    Text("\u4fdd\u5b58\u8bb0\u5f55")
-                }
-            }
-
-            TextButton(
-                onClick = { showAdvanced = !showAdvanced },
-                modifier = Modifier.align(Alignment.End)
-            ) {
-                Text(
-                    if (showAdvanced) "\u6536\u8d77\u8be6\u7ec6\u9879" else "\u5c55\u5f00\u8be6\u7ec6\u9879"
+                CompactActionChip(
+                    label = if (showAdvanced) "\u6536\u8d77\u8be6\u7ec6\u9879" else "\u8be6\u7ec6\u9879",
+                    onClick = { showAdvanced = !showAdvanced },
+                    modifier = Modifier.align(Alignment.End),
+                    color = accentColor
                 )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onSaveClick,
+                        modifier = Modifier.weight(1.35f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text("\u4fdd\u5b58\u8bb0\u5f55")
+                    }
+                    OutlinedButton(
+                        onClick = { showAdvanced = !showAdvanced },
+                        modifier = Modifier.weight(0.85f),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text(if (showAdvanced) "\u6536\u8d77" else "\u8be6\u7ec6\u9879")
+                    }
+                }
             }
 
             AnimatedVisibility(visible = showAdvanced) {
@@ -3260,7 +3309,7 @@ private fun EntryEditorSection(
                         },
                         minLines = 1,
                         maxLines = 2,
-                        shape = RoundedCornerShape(18.dp)
+                        shape = RoundedCornerShape(12.dp)
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -3293,7 +3342,7 @@ private fun EntryEditorSection(
                             },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            shape = RoundedCornerShape(18.dp)
+                            shape = RoundedCornerShape(12.dp)
                         )
                     }
 
@@ -3336,13 +3385,13 @@ private fun EntryEditorSection(
                     if (form.receiptText.isNotBlank()) {
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(20.dp)
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Text(
                                     text = "\u6700\u8fd1\u4e00\u6b21\u8bc6\u522b\u7ed3\u679c",
@@ -3351,74 +3400,33 @@ private fun EntryEditorSection(
                                 )
                                 Text(
                                     text = form.receiptText.take(120),
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
                     }
 
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(20.dp)
+                    OutlinedButton(
+                        onClick = onSaveTemplateClick,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Text(
-                            text = when (form.templatePlanType) {
+                            when (form.templatePlanType) {
                                 LedgerTemplatePlanType.STANDARD -> {
                                     if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
-                                        "\u8be6\u7ec6\u9879\u91cc\u53ef\u4ee5\u7edf\u4e00\u8bbe\u5907\u6ce8\u3001\u5b58\u6210\u6a21\u677f\uff0c\u6216\u8005\u76f4\u63a5\u626b\u5c0f\u7968\u586b\u5145\u4fe1\u606f\u3002"
+                                        "\u5b58\u4e3a\u6a21\u677f"
                                     } else {
-                                        "\u5f53\u524d\u6a21\u677f\u4f1a\u6309${form.templateRecurrence.displayName()}\u81ea\u52a8\u8865\u8d26\u3002"
+                                        "\u5b58\u4e3a\u5468\u671f"
                                     }
                                 }
 
-                                LedgerTemplatePlanType.SUBSCRIPTION -> {
-                                    "\u8ba2\u9605\u8ba1\u5212\u4f1a\u6309${form.templateRecurrence.displayName()}\u81ea\u52a8\u8865\u8d26\uff0c\u9002\u5408\u89c6\u9891\u4f1a\u5458\u3001\u4e91\u76d8\u548c\u7f51\u8d39\u7b49\u56fa\u5b9a\u6263\u8d39\u3002"
-                                }
-
-                                LedgerTemplatePlanType.INSTALLMENT -> {
-                                    "\u5206\u671f\u8ba1\u5212\u4f1a\u6309\u6bcf\u6708\u81ea\u52a8\u8865\u8d26\uff0c\u540c\u65f6\u8bb0\u5f55\u5df2\u5b8c\u6210\u7684\u671f\u6570\u8fdb\u5ea6\u3002"
-                                }
-                            },
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                LedgerTemplatePlanType.SUBSCRIPTION -> "\u5b58\u4e3a\u8ba2\u9605"
+                                LedgerTemplatePlanType.INSTALLMENT -> "\u5b58\u4e3a\u5206\u671f"
+                            }
                         )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = onScanReceiptClick,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(20.dp)
-                        ) {
-                            Text(
-                                if (isReceiptScanning) "\u8bc6\u522b\u4e2d..." else "\u8bc6\u522b\u5c0f\u7968"
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = onSaveTemplateClick,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(20.dp)
-                        ) {
-                            Text(
-                                when (form.templatePlanType) {
-                                    LedgerTemplatePlanType.STANDARD -> {
-                                        if (form.templateRecurrence == LedgerTemplateRecurrence.NONE) {
-                                            "\u5b58\u4e3a\u6a21\u677f"
-                                        } else {
-                                            "\u5b58\u4e3a\u5468\u671f"
-                                        }
-                                    }
-
-                                    LedgerTemplatePlanType.SUBSCRIPTION -> "\u5b58\u4e3a\u8ba2\u9605"
-                                    LedgerTemplatePlanType.INSTALLMENT -> "\u5b58\u4e3a\u5206\u671f"
-                                }
-                            )
-                        }
                     }
                 }
             }
@@ -3461,7 +3469,7 @@ private fun SelectionField(
             trailingIcon = {
                 ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
             },
-            shape = RoundedCornerShape(18.dp)
+            shape = RoundedCornerShape(12.dp)
         )
 
         ExposedDropdownMenu(
@@ -3546,27 +3554,283 @@ private fun EntryTypeButton(
     onClick: () -> Unit
 ) {
     val accentColor = if (type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
-
-    if (selected) {
-        Button(
-            onClick = onClick,
-            modifier = modifier,
-            shape = RoundedCornerShape(18.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = accentColor),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
-        ) {
-            Text(type.displayName())
-        }
+    val contentColor = if (selected) {
+        Color.White
     } else {
-        OutlinedButton(
-            onClick = onClick,
-            modifier = modifier,
-            shape = RoundedCornerShape(18.dp),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+        accentColor
+    }
+
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        color = if (selected) accentColor else accentColor.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Text(type.displayName())
+            Text(
+                text = type.displayName(),
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = FontWeight.SemiBold
+                ),
+                color = contentColor
+            )
         }
     }
+}
+
+@Composable
+private fun CompactActionChip(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    color: Color? = null
+) {
+    val chipColor = color ?: MaterialTheme.colorScheme.primary
+
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick),
+        color = chipColor.copy(alpha = 0.1f),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = chipColor
+        )
+    }
+}
+
+@Composable
+private fun HomeAutomationCard(
+    status: NotificationAutomationStatus,
+    trace: LedgerAutomationTrace,
+    pendingImports: List<PendingLedgerImport>,
+    onOpenNotificationAccess: () -> Unit,
+    onOpenAccessibilityAccess: () -> Unit,
+    onApprovePendingImport: (PendingLedgerImport) -> Unit,
+    onIgnorePendingImport: (PendingLedgerImport) -> Unit
+) {
+    val fullyEnabled = status.notificationAccessEnabled && status.accessibilityAccessEnabled
+    val titleColor = if (fullyEnabled) IncomeTint else ExpenseTint
+    val pendingImport = pendingImports.firstOrNull()
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SectionShape
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "\u81ea\u52a8\u8bb0\u8d26",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                    Text(
+                        text = when {
+                            pendingImports.isNotEmpty() -> "\u6709 ${pendingImports.size} \u7b14\u8bc6\u522b\u7ed3\u679c\u7b49\u5f85\u786e\u8ba4"
+                            fullyEnabled -> "\u5df2\u5f00\u542f\uff0c\u8bc6\u522b\u540e\u4f1a\u5f39\u51fa\u786e\u8ba4\u5165\u8d26"
+                            else -> "\u6253\u5f00\u6743\u9650\u540e\u624d\u80fd\u8bc6\u522b\u652f\u4ed8/\u6536\u6b3e"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    color = titleColor.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(999.dp)
+                ) {
+                    Text(
+                        text = if (fullyEnabled) "\u5df2\u5f00" else "\u5f85\u5f00\u542f",
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = titleColor
+                    )
+                }
+            }
+
+            if (pendingImport != null) {
+                PendingImportInlinePrompt(
+                    pendingImport = pendingImport,
+                    onApprove = { onApprovePendingImport(pendingImport) },
+                    onIgnore = { onIgnorePendingImport(pendingImport) }
+                )
+            } else {
+                Text(
+                    text = if (trace.isAvailable) {
+                        "\u6700\u8fd1\uff1a${trace.summary}"
+                    } else {
+                        "\u6700\u8fd1\uff1a\u6682\u65e0\u8bc6\u522b\u8bb0\u5f55"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (!fullyEnabled) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onOpenNotificationAccess,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(if (status.notificationAccessEnabled) "\u901a\u77e5\u5df2\u5f00" else "\u6253\u5f00\u901a\u77e5")
+                    }
+                    OutlinedButton(
+                        onClick = onOpenAccessibilityAccess,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(if (status.accessibilityAccessEnabled) "\u65e0\u969c\u788d\u5df2\u5f00" else "\u6253\u5f00\u65e0\u969c\u788d")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingImportInlinePrompt(
+    pendingImport: PendingLedgerImport,
+    onApprove: () -> Unit,
+    onIgnore: () -> Unit
+) {
+    val accentColor = if (pendingImport.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
+    Surface(
+        color = accentColor.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${pendingImport.account} / ${pendingImport.category}",
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+                Text(
+                    text = pendingImport.signedAmountText(),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = accentColor
+                )
+            }
+            Text(
+                text = pendingImport.note.ifBlank { pendingImport.receiptText.take(60) },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onApprove,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Text("\u786e\u8ba4\u5165\u8d26")
+                }
+                OutlinedButton(
+                    onClick = onIgnore,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Text("\u5ffd\u7565")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoImportConfirmDialog(
+    pendingImport: PendingLedgerImport,
+    onConfirm: () -> Unit,
+    onIgnore: () -> Unit,
+    onLater: () -> Unit
+) {
+    val accentColor = if (pendingImport.type == LedgerEntryType.INCOME) IncomeTint else ExpenseTint
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onLater,
+        title = {
+            Text("\u68c0\u6d4b\u5230\u4e00\u7b14${pendingImport.type.displayName()}")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = pendingImport.signedAmountText(),
+                    style = MaterialTheme.typography.headlineLarge.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = accentColor
+                )
+                Text(
+                    text = "${pendingImport.account} / ${pendingImport.category}",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                if (pendingImport.note.isNotBlank() || pendingImport.receiptText.isNotBlank()) {
+                    Text(
+                        text = pendingImport.note.ifBlank { pendingImport.receiptText.take(100) },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "\u662f\u5426\u73b0\u5728\u5165\u8d26\uff1f",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("\u786e\u8ba4\u5165\u8d26")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = onLater) {
+                    Text("\u7a0d\u540e")
+                }
+                TextButton(onClick = onIgnore) {
+                    Text("\u5ffd\u7565")
+                }
+            }
+        }
+    )
 }
 
 @Composable
@@ -3584,12 +3848,12 @@ private fun AutomationSection(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             SectionHeading(
                 title = "\u81ea\u52a8\u8bb0\u8d26",
-                subtitle = "\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u8bfb\u5c4f\u90fd\u53ef\u4ee5\u81ea\u52a8\u5bfc\u5165\uff0c\u652f\u4ed8\u6210\u529f\u9875\u3001\u6536\u6b3e\u6210\u529f\u9875\u548c\u901a\u77e5\u90fd\u4f1a\u88ab\u5c1d\u8bd5\u8bc6\u522b"
+                subtitle = "\u652f\u4ed8\u6210\u529f\u9875\u548c\u901a\u77e5\u4f1a\u81ea\u52a8\u8bc6\u522b\u5165\u8d26"
             )
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3625,31 +3889,19 @@ private fun AutomationSection(
 
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(20.dp)
+                shape = RoundedCornerShape(12.dp)
             ) {
                 Text(
                     text = if (status.notificationAccessEnabled && status.accessibilityAccessEnabled) {
-                        "\u5f53\u524d\u5df2\u540c\u65f6\u6253\u5f00\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u8bfb\u5c4f\u3002\u80cc\u666f\u901a\u77e5\u3001\u652f\u4ed8\u7ed3\u679c\u9875\u3001\u6536\u6b3e\u9875\u90fd\u4f1a\u88ab\u5c1d\u8bd5\u8bc6\u522b\u3002"
+                        "\u901a\u77e5\u548c\u65e0\u969c\u788d\u5df2\u5f00\uff0c\u53ef\u8bc6\u522b\u901a\u77e5\u3001\u652f\u4ed8\u7ed3\u679c\u548c\u6536\u6b3e\u9875\u3002"
                     } else if (status.notificationAccessEnabled || status.accessibilityAccessEnabled) {
-                        "\u81ea\u52a8\u8bb0\u8d26\u5df2\u5f00\u542f\u4e00\u90e8\u5206\u80fd\u529b\uff0c\u4f46\u8fd8\u6ca1\u5168\u90e8\u6253\u901a\u3002\u5efa\u8bae\u5c06\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u90fd\u6253\u5f00\uff0c\u8ba9\u901a\u77e5\u548c\u652f\u4ed8\u6210\u529f\u9875\u90fd\u80fd\u8fdb\u5165\u89e3\u6790\u3002"
+                        "\u5df2\u5f00\u542f\u90e8\u5206\u80fd\u529b\uff0c\u5efa\u8bae\u540c\u65f6\u6253\u5f00\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u3002"
                     } else {
-                        "\u8981\u8ba9\u81ea\u52a8\u8bb0\u8d26\u751f\u6548\uff0c\u8bf7\u5148\u5728\u7cfb\u7edf\u8bbe\u7f6e\u91cc\u6253\u5f00\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u670d\u52a1\u3002\u8fd9\u6837\u4e0d\u9700\u8981\u5fae\u4fe1/\u652f\u4ed8\u5b9d\u79c1\u6709\u63a5\u53e3\u4e5f\u80fd\u62ff\u5230\u4ea4\u6613\u7ed3\u679c\u3002"
+                        "\u8bf7\u6253\u5f00\u901a\u77e5\u8bbf\u95ee\u548c\u65e0\u969c\u788d\u670d\u52a1\u3002"
                     },
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Text(
-                    text = "\u53d7\u7b2c\u4e09\u65b9 App \u9650\u5236\uff0c\u4e0d\u4fdd\u8bc1\u80fd\u8df3\u5230\u6307\u5b9a\u4ed8\u6b3e\u7801\u6216\u6536\u6b3e\u7801\u9875\u3002\u4f46\u53ea\u8981\u4ea4\u6613\u540e\u663e\u793a\u6210\u529f\u9875\u6216\u53d1\u51fa\u901a\u77e5\uff0c\u5c31\u4f1a\u5c1d\u8bd5\u81ea\u52a8\u5165\u8d26\u3002",
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
 
@@ -3657,7 +3909,8 @@ private fun AutomationSection(
                 OutlinedButton(
                     onClick = onOpenNotificationAccess,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     Text(if (status.notificationAccessEnabled) "\u901a\u77e5\u6743\u9650" else "\u6253\u5f00\u901a\u77e5")
                 }
@@ -3667,19 +3920,20 @@ private fun AutomationSection(
                 OutlinedButton(
                     onClick = onOpenAccessibilityAccess,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     Text(if (status.accessibilityAccessEnabled) "\u65e0\u969c\u788d\u6743\u9650" else "\u6253\u5f00\u65e0\u969c\u788d")
                 }
                 Surface(
                     modifier = Modifier.weight(1f),
                     color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
-                        text = "\u53ef\u5728\u4e0b\u65b9\u201c\u6700\u8fd1\u81ea\u52a8\u8bb0\u8d26\u72b6\u6001\u201d\u91cc\u770b\u6700\u8fd1\u4e00\u6b21\u8bc6\u522b\u5230\u7684\u6587\u672c",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "\u4e0b\u65b9\u53ef\u67e5\u6700\u8fd1\u8bc6\u522b\u72b6\u6001",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -3690,7 +3944,8 @@ private fun AutomationSection(
                     onClick = onOpenWeChat,
                     modifier = Modifier.weight(1f),
                     enabled = status.isWeChatInstalled,
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     Text("\u6253\u5f00\u5fae\u4fe1")
                 }
@@ -3698,7 +3953,8 @@ private fun AutomationSection(
                     onClick = onOpenAlipay,
                     modifier = Modifier.weight(1f),
                     enabled = status.isAlipayInstalled,
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     Text("\u6253\u5f00\u652f\u4ed8\u5b9d")
                 }
@@ -4510,14 +4766,16 @@ private fun SectionHeading(
     title: String,
     subtitle: String
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             text = title,
-            style = MaterialTheme.typography.headlineLarge
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.SemiBold
+            )
         )
         Text(
             text = subtitle,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
@@ -4591,31 +4849,33 @@ private fun LedgerEntryCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Top
         ) {
             Box(
                 modifier = Modifier
-                    .width(6.dp)
-                    .height(84.dp)
+                    .width(4.dp)
+                    .height(64.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(accentColor.copy(alpha = 0.88f))
             )
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.Top
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             text = entry.category,
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold
+                            )
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Surface(
@@ -4644,11 +4904,11 @@ private fun LedgerEntryCard(
                     }
                     Surface(
                         color = accentColor.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(18.dp)
+                        shape = RoundedCornerShape(12.dp)
                     ) {
                         Text(
                             text = formatSignedCurrency(entry),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontFamily = FontFamily.Monospace
                             ),
@@ -4660,7 +4920,7 @@ private fun LedgerEntryCard(
                 if (entry.note.isNotBlank()) {
                     Text(
                         text = entry.note,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -4678,6 +4938,7 @@ private fun LedgerEntryCard(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(
                             onClick = onEditClick,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
                                 .border(
                                     width = 1.dp,
@@ -4691,6 +4952,7 @@ private fun LedgerEntryCard(
                             onClick = {
                                 showDeleteConfirm = true
                             },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
                                 .border(
                                     width = 1.dp,
@@ -4801,18 +5063,6 @@ private fun LedgerBoard.displayName(): String {
         LedgerBoard.BUDGET -> "\u89c4\u5212"
         LedgerBoard.SETTINGS -> "\u8bbe\u7f6e"
         LedgerBoard.LEDGER -> "\u8d26\u672c"
-    }
-}
-
-private fun LedgerBoard.subtitle(): String {
-    return when (this) {
-        LedgerBoard.ENTRY -> "\u65b0\u589e\u8bb0\u5f55\u548c\u6700\u8fd1\u8d26\u5355"
-        LedgerBoard.DASHBOARD -> "\u4f59\u989d\u603b\u89c8\u3001\u8d26\u6237\u770b\u677f\u548c\u6838\u5fc3\u6307\u6807"
-        LedgerBoard.CALENDAR -> "\u6309\u5929\u56de\u770b\u672c\u6708\u6536\u652f"
-        LedgerBoard.STATS -> "\u6536\u652f\u56fe\u8868\u3001\u8d8b\u52bf\u548c\u5206\u7c7b\u660e\u7ec6"
-        LedgerBoard.BUDGET -> "\u9884\u7b97\u3001\u5e38\u7528\u6a21\u677f\u548c\u5468\u671f\u6a21\u677f\u90fd\u5728\u8fd9\u91cc"
-        LedgerBoard.SETTINGS -> "\u81ea\u52a8\u8bb0\u8d26\u3001\u5907\u4efd\u548c\u8fc1\u79fb"
-        LedgerBoard.LEDGER -> "\u7b5b\u9009\u5e76\u7ba1\u7406\u5168\u90e8\u8d26\u76ee"
     }
 }
 
@@ -5108,6 +5358,11 @@ private fun formatCurrency(amountInCents: Long): String {
 private fun formatSignedCurrency(entry: LedgerEntry): String {
     val prefix = if (entry.type == LedgerEntryType.INCOME) "+" else "-"
     return prefix + formatCurrency(entry.amountInCents)
+}
+
+private fun PendingLedgerImport.signedAmountText(): String {
+    val prefix = if (type == LedgerEntryType.INCOME) "+" else "-"
+    return prefix + formatCurrency(amountInCents)
 }
 
 private fun formatEntryTime(timestamp: Long): String {
